@@ -1,0 +1,51 @@
+{
+  "expo": {
+    "name": "BloomAR",
+    "slug": "bloomar",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "scheme": "bloomar",
+    "jsEngine": "hermes",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#FF5C8A"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.bloomar.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Allow BloomAR to access your camera to scan flowers and visualize bouquets in AR.",
+        "NSPhotoLibraryUsageDescription": "Allow BloomAR to save and export your bouquet designs.",
+        "NSPhotoLibraryAddUsageDescription": "Allow BloomAR to save bouquet images to your photo library."
+      },
+      "config": {
+        "usesARKit": true
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#FF5C8A"
+      },
+      "package": "com.bloomar.app",
+      "permissions": [
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE"
+      ],
+      "minSdkVersion": 28
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow BloomAR to access your camera to scan flowers and visualize bouquets in AR."
+        }
+      ],
+      "expo-router"
+    ]
+  }
+}
