@@ -23,9 +23,6 @@
         "NSCameraUsageDescription": "Allow BloomAR to access your camera to scan flowers and visualize bouquets in AR.",
         "NSPhotoLibraryUsageDescription": "Allow BloomAR to save and export your bouquet designs.",
         "NSPhotoLibraryAddUsageDescription": "Allow BloomAR to save bouquet images to your photo library."
-      },
-      "config": {
-        "usesARKit": true
       }
     },
     "android": {
@@ -36,9 +33,10 @@
       "permissions": [
         "CAMERA",
         "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE"
-      ],
-      "minSdkVersion": 28
+        "WRITE_EXTERNAL_STORAGE",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "plugins": [
       [
@@ -47,7 +45,14 @@
           "cameraPermission": "Allow BloomAR to access your camera to scan flowers and visualize bouquets in AR."
         }
       ],
-      "expo-router"
-    ]
+      "expo-router",
+      "expo-asset"
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "c0908a62-3968-4b8e-a559-b7330661bb66"
+      }
+    }
   }
 }

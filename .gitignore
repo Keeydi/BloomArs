@@ -14,10 +14,14 @@ build/
 dist/
 *.egg-info/
 
-# Generated models
+# Generated models (keep assets/models/ tracked)
 generated_models/
-*.glb
-*.gltf
+# *.glb - Removed: need to track assets/models/*.glb for EAS Build
+# *.gltf
+
+# Allow 3D model assets to be tracked
+!assets/models/*.glb
+!assets/models/*.gltf
 
 # IDE
 .vscode/
@@ -29,3 +33,7 @@ generated_models/
 .DS_Store
 Thumbs.db
 node_modules
+
+# Expo
+.expo/
+dist/
