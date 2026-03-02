@@ -47,6 +47,8 @@ export interface DetectedFlower {
   confidence: number;
   imageUri?: string;
   detectedAt: number;
+  flowerType?: string;
+  flowerName?: string;
 }
 
 export interface CustomizationState {

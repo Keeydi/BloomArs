@@ -1,10 +1,15 @@
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert, PanResponder } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useState, useRef } from 'react';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useBouquetStore } from '@/store/bouquetStore';
 import { BackgroundGradient } from '@/components/BackgroundGradient';
+import { extractFlowerInfo } from '@/utils/colorExtractor';
+import { getFlowerModel } from '@/utils/modelRegistry';
+import { GLView } from 'expo-gl';
+import { Renderer } from 'expo-three';
+import * as THREE from 'three';
 
 export default function CameraScreen() {
   const router = useRouter();
@@ -13,7 +18,37 @@ export default function CameraScreen() {
   const cameraRef = useRef<CameraView>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const [isProcessing, setIsProcessing] = useState(false);
-  const { setDetectedFlower } = useBouquetStore();
+  const [showARModel, setShowARModel] = useState(false);
+  const [isLoadingModel, setIsLoadingModel] = useState(false);
+  const { setDetectedFlower, detectedFlower } = useBouquetStore();
+
+  const modelRef = useRef<THREE.Group | null>(null);
+  const rotationRef = useRef({ x: 0, y: 0 });
+  const lastTouchRef = useRef({ x: 0, y: 0 });
+
+  // Pan responder for 3D model rotation
+  const panResponder = PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onStartShouldSetPanResponderCapture: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponderCapture: () => true,
+    onPanResponderGrant: (evt) => {
+      const touch = evt.nativeEvent;
+      lastTouchRef.current = { x: touch.pageX, y: touch.pageY };
+    },
+    onPanResponderMove: (evt) => {
+      if (!showARModel) return;
+      const touch = evt.nativeEvent;
+      const deltaX = touch.pageX - lastTouchRef.current.x;
+      const deltaY = touch.pageY - lastTouchRef.current.y;
+
+      rotationRef.current.y += deltaX * 0.01;
+      rotationRef.current.x += deltaY * 0.01;
+      rotationRef.current.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, rotationRef.current.x));
+
+      lastTouchRef.current = { x: touch.pageX, y: touch.pageY };
+    },
+  });
 
   if (!permission) {
     return (
@@ -47,7 +82,7 @@ export default function CameraScreen() {
 
     try {
       setIsProcessing(true);
-      
+
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.8,
         base64: false,
@@ -65,36 +100,31 @@ export default function CameraScreen() {
       if (!dirInfo.exists) {
         await FileSystem.makeDirectoryAsync(flowersDir, { intermediates: true });
       }
-      
+
       const savedPath = `${flowersDir}${fileName}`;
       await FileSystem.copyAsync({
         from: photo.uri,
         to: savedPath,
       });
 
-      // Save detected flower info
-      const detectedFlower = {
-        color: '#FF5C8A', // Default color - can be extracted later
-        shape: 'round',
-        confidence: 1.0,
+      // Extract flower information (color + type detection)
+      console.log('🔍 Analyzing captured flower...');
+      const flowerInfo = await extractFlowerInfo(savedPath);
+      console.log('✅ Detection complete:', flowerInfo);
+
+      // Store detected flower info with all required fields
+      setDetectedFlower({
+        color: flowerInfo.color,
+        flowerType: flowerInfo.flowerType,
+        flowerName: flowerInfo.flowerName,
+        shape: 'round', // Default shape
+        confidence: 0.8, // Default confidence
         imageUri: savedPath,
         detectedAt: Date.now(),
-      };
-      
-      setDetectedFlower(detectedFlower);
+      });
 
-      Alert.alert(
-        'Success!',
-        'Flower image captured successfully!',
-        [
-          {
-            text: 'OK',
-            onPress: () => {
-              router.back();
-            },
-          },
-        ]
-      );
+      // Show AR model overlay
+      setShowARModel(true);
 
     } catch (error) {
       console.error('Error capturing image:', error);
@@ -108,6 +138,119 @@ export default function CameraScreen() {
     }
   };
 
+  const handleContinue = () => {
+    // Navigate to editor with the detected flower
+    router.push('/editor');
+  };
+
+  const handleRetake = () => {
+    // Hide AR model and allow retaking
+    setShowARModel(false);
+    rotationRef.current = { x: 0, y: 0 };
+  };
+
+  // 3D model loading function
+  const onGLContextCreate = async (gl: any) => {
+    try {
+      setIsLoadingModel(true);
+
+      const renderer = new Renderer({ gl }) as any;
+      renderer.setSize(gl.drawingBufferWidth, gl.drawingBufferHeight);
+
+      const scene = new THREE.Scene();
+      scene.background = null; // Transparent background to see camera
+
+      const camera = new THREE.PerspectiveCamera(
+        75,
+        gl.drawingBufferWidth / gl.drawingBufferHeight,
+        0.1,
+        1000
+      );
+      camera.position.z = 5;
+
+      // Add lighting
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+      scene.add(ambientLight);
+
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1.0);
+      directionalLight.position.set(5, 10, 7.5);
+      scene.add(directionalLight);
+
+      // Load GLB model based on detected flower type
+      const Asset = await import('expo-asset');
+      // @ts-ignore - GLTFLoader types are not available in React Native
+      const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
+      const loader = new GLTFLoader();
+
+      // Get the appropriate model for detected flower type
+      const flowerType = detectedFlower?.flowerType || 'generic-flower';
+      const modelInfo = getFlowerModel(flowerType as any);
+
+      console.log('🌸 Loading 3D model for:', modelInfo.displayName);
+
+      const modelAsset = Asset.Asset.fromModule(modelInfo.modelPath);
+      await modelAsset.downloadAsync();
+
+      // Suppress texture errors
+      const originalError = console.error;
+      console.error = (...args: any[]) => {
+        if (args[0]?.includes?.('THREE.GLTFLoader: Couldn\'t load texture')) {
+          return;
+        }
+        originalError(...args);
+      };
+
+      loader.load(
+        modelAsset.localUri || modelAsset.uri,
+        (gltf: any) => {
+          console.error = originalError;
+          const flowerModel = gltf.scene;
+
+          flowerModel.scale.set(1.5, 1.5, 1.5);
+          flowerModel.position.set(0, -0.5, 0);
+
+          // Ensure materials render correctly with textures
+          flowerModel.traverse((child: any) => {
+            if (child instanceof THREE.Mesh) {
+              if (child.material) {
+                child.material.needsUpdate = true;
+                child.castShadow = true;
+                child.receiveShadow = true;
+              }
+            }
+          });
+
+          scene.add(flowerModel);
+          modelRef.current = flowerModel;
+          setIsLoadingModel(false);
+
+          const animate = () => {
+            requestAnimationFrame(animate);
+
+            if (modelRef.current) {
+              modelRef.current.rotation.x = rotationRef.current.x;
+              modelRef.current.rotation.y = rotationRef.current.y;
+            }
+
+            renderer.render(scene, camera);
+            gl.endFrameEXP();
+          };
+
+          animate();
+        },
+        undefined,
+        (error: any) => {
+          console.error = originalError;
+          console.error('Error loading GLB model:', error);
+          setIsLoadingModel(false);
+        }
+      );
+    } catch (error) {
+      console.error('Error setting up 3D scene:', error);
+      setIsLoadingModel(false);
+    }
+  };
+
 
   return (
     <View style={styles.container}>
@@ -117,56 +260,110 @@ export default function CameraScreen() {
         facing="back"
       >
         {/* Overlay with capture rectangle */}
-        <View style={styles.overlay}>
+        <View style={styles.overlay} pointerEvents="box-none">
+          {/* AR 3D Model Overlay - appears after capture */}
+          {showARModel && (
+            <View style={styles.arOverlay} pointerEvents="box-none">
+              <GLView
+                style={styles.glView}
+                onContextCreate={onGLContextCreate}
+              />
+            </View>
+          )}
+          {/* Rotation touch area - only in center */}
+          {showARModel && (
+            <View style={styles.rotationArea} {...panResponder.panHandlers} />
+          )}
           {/* Top section */}
           <View style={styles.topSection}>
             <TouchableOpacity
               style={styles.closeButton}
               onPress={() => router.back()}
+              activeOpacity={0.7}
             >
               <Text style={styles.closeButtonText}>✕</Text>
             </TouchableOpacity>
             <View style={styles.categoryBadge}>
-              <Text style={styles.categoryText}>{category}</Text>
+              <Text style={styles.categoryText}>{showARModel ? 'AR View' : category}</Text>
             </View>
           </View>
 
           {/* Instructions */}
-          <View style={styles.instructionsContainer}>
+          <View style={styles.instructionsContainer} pointerEvents="none">
             <Text style={styles.instructionsText}>
-              Position the flower in the frame
+              {showARModel
+                ? `${getFlowerModel(detectedFlower?.flowerType as any || 'generic-flower').emoji} 3D ${detectedFlower?.flowerName || 'Flower'} AR View`
+                : 'Position the flower in the frame'}
             </Text>
+            {showARModel && (
+              <Text style={styles.instructionsSubtext}>
+                Drag to rotate the model
+              </Text>
+            )}
           </View>
 
-          {/* Capture rectangle */}
-          <View style={styles.captureArea}>
-            <View style={styles.captureRectangle}>
-              {/* Corner indicators */}
-              <View style={[styles.corner, styles.topLeft]} />
-              <View style={[styles.corner, styles.topRight]} />
-              <View style={[styles.corner, styles.bottomLeft]} />
-              <View style={[styles.corner, styles.bottomRight]} />
+          {/* Capture rectangle - only show when not in AR mode */}
+          {!showARModel && (
+            <View style={styles.captureArea} pointerEvents="none">
+              <View style={styles.captureRectangle}>
+                {/* Corner indicators */}
+                <View style={[styles.corner, styles.topLeft]} />
+                <View style={[styles.corner, styles.topRight]} />
+                <View style={[styles.corner, styles.bottomLeft]} />
+                <View style={[styles.corner, styles.bottomRight]} />
+              </View>
             </View>
-          </View>
+          )}
 
-          {/* Bottom section with capture button */}
+          {/* Bottom section with capture/continue buttons */}
           <View style={styles.bottomSection}>
-            <TouchableOpacity
-              style={[styles.captureButton, isProcessing && styles.captureButtonDisabled]}
-              onPress={handleCapture}
-              disabled={isProcessing}
-            >
-              {isProcessing ? (
-                <ActivityIndicator size="large" color="#FFFFFF" />
-              ) : (
-                <View style={styles.captureButtonInner} />
-              )}
-            </TouchableOpacity>
-            <Text style={styles.captureHint}>
-              {isProcessing ? 'Processing...' : 'Tap to capture'}
-            </Text>
+            {showARModel ? (
+              // AR mode buttons
+              <View style={styles.buttonContainer}>
+                <TouchableOpacity
+                  style={styles.secondaryButton}
+                  onPress={handleRetake}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.secondaryButtonText}>Retake</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.primaryButton}
+                  onPress={handleContinue}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.primaryButtonText}>Continue</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              // Capture mode button
+              <>
+                <TouchableOpacity
+                  style={[styles.captureButton, isProcessing && styles.captureButtonDisabled]}
+                  onPress={handleCapture}
+                  disabled={isProcessing}
+                >
+                  {isProcessing ? (
+                    <ActivityIndicator size="large" color="#FFFFFF" />
+                  ) : (
+                    <View style={styles.captureButtonInner} />
+                  )}
+                </TouchableOpacity>
+                <Text style={styles.captureHint}>
+                  {isProcessing ? 'Processing...' : 'Tap to capture'}
+                </Text>
+              </>
+            )}
           </View>
         </View>
+
+        {/* Loading overlay for 3D model */}
+        {isLoadingModel && (
+          <View style={styles.loadingOverlay}>
+            <ActivityIndicator size="large" color="#FFD166" />
+            <Text style={styles.loadingText}>Loading AR Model...</Text>
+          </View>
+        )}
       </CameraView>
     </View>
   );
@@ -180,7 +377,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   overlay: {
-    flex: 1,
+    ...StyleSheet.absoluteFillObject,
     backgroundColor: 'transparent',
   },
   topSection: {
@@ -190,6 +387,7 @@ const styles = StyleSheet.create({
     paddingTop: 60,
     paddingHorizontal: 20,
     paddingBottom: 20,
+    zIndex: 10,
   },
   closeButton: {
     width: 40,
@@ -287,6 +485,7 @@ const styles = StyleSheet.create({
     paddingBottom: 40,
     paddingHorizontal: 20,
     alignItems: 'center',
+    zIndex: 10,
   },
   captureButton: {
     width: 80,
@@ -351,6 +550,87 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '700',
+  },
+  // AR overlay styles
+  arOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 1,
+  },
+  rotationArea: {
+    position: 'absolute',
+    top: '20%',
+    bottom: '20%',
+    left: '10%',
+    right: '10%',
+    zIndex: 2,
+  },
+  arTouchableArea: {
+    flex: 1,
+  },
+  glView: {
+    flex: 1,
+    width: '100%',
+    height: '100%',
+    backgroundColor: 'transparent',
+  },
+  instructionsSubtext: {
+    color: 'rgba(255, 255, 255, 0.8)',
+    fontSize: 14,
+    textAlign: 'center',
+    marginTop: 8,
+    textShadowColor: 'rgba(0, 0, 0, 0.75)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  buttonContainer: {
+    flexDirection: 'row',
+    gap: 12,
+    paddingHorizontal: 20,
+  },
+  secondaryButton: {
+    flex: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    borderRadius: 12,
+    paddingVertical: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.4)',
+  },
+  secondaryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  primaryButton: {
+    flex: 2,
+    backgroundColor: '#FFD166',
+    borderRadius: 12,
+    paddingVertical: 16,
+    alignItems: 'center',
+    shadowColor: '#FFD166',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  primaryButtonText: {
+    color: '#000000',
+    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+  },
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10,
+  },
+  loadingText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    marginTop: 16,
+    fontWeight: '600',
   },
 });
 

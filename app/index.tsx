@@ -1,11 +1,13 @@
-import { View, Text, StyleSheet, TouchableOpacity, Animated, Easing } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Animated, Easing, ScrollView, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useBouquetStore } from '@/store/bouquetStore';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Colors } from '@/constants/Colors';
+import { Colors, CategoryColors } from '@/constants/Colors';
 import { useEffect, useRef } from 'react';
 import { BackgroundGradient } from '@/components/BackgroundGradient';
 import { AnimatedCard } from '@/components/AnimatedCard';
+import { Ionicons } from '@expo/vector-icons';
+import { Bouquet } from '@/types';
 
 interface FeatureCardProps {
   title: string;
@@ -110,13 +112,84 @@ function AnimatedFlower() {
   );
 }
 
+interface SavedBouquetCardProps {
+  bouquet: Bouquet;
+  index: number;
+  onPress: () => void;
+  onDelete: () => void;
+}
+
+function SavedBouquetCard({ bouquet, index, onPress, onDelete }: SavedBouquetCardProps) {
+  const categoryColor = CategoryColors[bouquet.category]?.[2] || Colors.primary;
+
+  return (
+    <AnimatedCard color={categoryColor} index={index}>
+      <TouchableOpacity style={styles.savedBouquetContent} onPress={onPress} activeOpacity={0.8}>
+        <View style={styles.savedBouquetLeft}>
+          <View style={[styles.bouquetCategoryIcon, { backgroundColor: categoryColor + '30' }]}>
+            <View style={styles.flowerDotsContainer}>
+              {bouquet.flowers.slice(0, 3).map((flower, i) => (
+                <View
+                  key={flower.id}
+                  style={[
+                    styles.flowerDotSmall,
+                    { backgroundColor: flower.color, marginLeft: i > 0 ? -6 : 0 },
+                  ]}
+                />
+              ))}
+            </View>
+          </View>
+          <View style={styles.savedBouquetInfo}>
+            <Text style={styles.savedBouquetCategory}>{bouquet.category}</Text>
+            <Text style={styles.savedBouquetDetails}>
+              {bouquet.flowers.length} flower{bouquet.flowers.length !== 1 ? 's' : ''}
+            </Text>
+          </View>
+        </View>
+        <View style={styles.savedBouquetActions}>
+          <TouchableOpacity
+            style={styles.deleteButton}
+            onPress={(e) => {
+              e.stopPropagation();
+              onDelete();
+            }}
+          >
+            <Ionicons name="trash-outline" size={18} color="#FF5C8A" />
+          </TouchableOpacity>
+          <Ionicons name="chevron-forward" size={20} color="rgba(255, 255, 255, 0.6)" />
+        </View>
+      </TouchableOpacity>
+    </AnimatedCard>
+  );
+}
+
 export default function HomeScreen() {
   const router = useRouter();
-  const { resetCurrentBouquet } = useBouquetStore();
+  const { resetCurrentBouquet, savedBouquets, loadBouquet, deleteBouquet } = useBouquetStore();
 
   const handleNavigateToCategory = () => {
     resetCurrentBouquet();
     router.push('/category');
+  };
+
+  const handleLoadBouquet = (bouquetId: string) => {
+    loadBouquet(bouquetId);
+    router.push('/editor');
+  };
+
+  const handleDeleteBouquet = (bouquetId: string) => {
+    Alert.alert(
+      'Delete Bouquet',
+      'Are you sure you want to delete this bouquet?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => deleteBouquet(bouquetId),
+        },
+      ]
+    );
   };
 
   const features = [
@@ -169,76 +242,98 @@ export default function HomeScreen() {
 
   return (
     <BackgroundGradient circles={backgroundCircles}>
-
-        <View style={styles.content}>
-          <Animated.View
-            style={[
-              styles.header,
-              {
-                opacity: headerFade,
-                transform: [{ translateY: headerSlide }],
-              },
-            ]}
-          >
-            <View style={styles.logoContainer}>
-              <AnimatedFlower />
-            </View>
-            <Text style={styles.title}>BloomAR</Text>
-            <Text style={styles.subtitle}>
-              Craft stunning bouquets with augmented reality
-            </Text>
-          </Animated.View>
-
-          <View style={styles.actionSection}>
-            <TouchableOpacity
-              style={styles.primaryButton}
-              onPress={handleNavigateToCategory}
-              activeOpacity={0.9}
-            >
-              <LinearGradient
-                colors={['#FF5C8A', '#FF8FA3']}
-                style={styles.buttonGradient}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-              >
-                <Text style={styles.primaryButtonText}>Create New Bouquet</Text>
-              </LinearGradient>
-            </TouchableOpacity>
+      <ScrollView
+        style={styles.scrollView}
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+      >
+        <Animated.View
+          style={[
+            styles.header,
+            {
+              opacity: headerFade,
+              transform: [{ translateY: headerSlide }],
+            },
+          ]}
+        >
+          <View style={styles.logoContainer}>
+            <AnimatedFlower />
           </View>
+          <Text style={styles.title}>BloomAR</Text>
+          <Text style={styles.subtitle}>
+            Craft stunning bouquets with augmented reality
+          </Text>
+        </Animated.View>
 
-          <View style={styles.featuresSection}>
-            <Text style={styles.sectionTitle}>Capabilities</Text>
-            <View style={styles.featuresGrid}>
-              {features.map((feature, index) => (
-                <FeatureCard
-                  key={index}
-                  title={feature.title}
-                  description={feature.description}
-                  color={feature.color}
+        <View style={styles.actionSection}>
+          <TouchableOpacity
+            style={styles.primaryButton}
+            onPress={handleNavigateToCategory}
+            activeOpacity={0.9}
+          >
+            <LinearGradient
+              colors={['#FF5C8A', '#FF8FA3']}
+              style={styles.buttonGradient}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+            >
+              <Text style={styles.primaryButtonText}>Create New Bouquet</Text>
+            </LinearGradient>
+          </TouchableOpacity>
+        </View>
+
+        {/* My Bouquets Section */}
+        {savedBouquets.length > 0 && (
+          <View style={styles.myBouquetsSection}>
+            <Text style={styles.sectionTitle}>My Bouquets</Text>
+            <View style={styles.savedBouquetsGrid}>
+              {savedBouquets.map((bouquet, index) => (
+                <SavedBouquetCard
+                  key={bouquet.id}
+                  bouquet={bouquet}
                   index={index}
+                  onPress={() => handleLoadBouquet(bouquet.id)}
+                  onDelete={() => handleDeleteBouquet(bouquet.id)}
                 />
               ))}
             </View>
           </View>
+        )}
+
+        <View style={styles.featuresSection}>
+          <Text style={styles.sectionTitle}>Capabilities</Text>
+          <View style={styles.featuresGrid}>
+            {features.map((feature, index) => (
+              <FeatureCard
+                key={index}
+                title={feature.title}
+                description={feature.description}
+                color={feature.color}
+                index={index}
+              />
+            ))}
+          </View>
         </View>
+      </ScrollView>
     </BackgroundGradient>
   );
 }
 
 const styles = StyleSheet.create({
-  content: {
+  scrollView: {
     flex: 1,
+  },
+  content: {
+    flexGrow: 1,
     paddingTop: 60,
     paddingBottom: 40,
     paddingHorizontal: 24,
-    justifyContent: 'space-between',
     zIndex: 1,
   },
   header: {
     alignItems: 'center',
-    flex: 1,
     justifyContent: 'center',
-    maxHeight: 260,
+    marginBottom: 40,
   },
   logoContainer: {
     marginBottom: 24,
@@ -331,8 +426,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.2,
   },
   actionSection: {
-    marginBottom: 24,
-    gap: 12,
+    marginBottom: 32,
   },
   primaryButton: {
     borderRadius: 16,
@@ -355,10 +449,69 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 0.3,
   },
-  featuresSection: {
+  myBouquetsSection: {
+    marginBottom: 24,
+  },
+  savedBouquetsGrid: {
+    gap: 12,
+  },
+  savedBouquetContent: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  savedBouquetLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
     flex: 1,
-    justifyContent: 'flex-end',
-    minHeight: 180,
+  },
+  bouquetCategoryIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  flowerDotsContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  flowerDotSmall: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.8)',
+  },
+  savedBouquetInfo: {
+    flex: 1,
+  },
+  savedBouquetCategory: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    marginBottom: 2,
+  },
+  savedBouquetDetails: {
+    fontSize: 13,
+    color: 'rgba(255, 255, 255, 0.6)',
+  },
+  savedBouquetActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  deleteButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255, 92, 138, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  featuresSection: {
+    marginTop: 8,
   },
   sectionTitle: {
     fontSize: 24,

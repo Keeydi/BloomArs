@@ -108,11 +108,8 @@ export default function CategoryScreen() {
   const handleSelectCategory = (category: BouquetCategory) => {
     setSelectedCategory(category);
     createBouquet(category);
-    // Navigate to camera screen to capture flower
-    router.push({
-      pathname: '/camera',
-      params: { category },
-    });
+    // Navigate to editor screen
+    router.push('/editor');
   };
 
   const backgroundCircles = [
