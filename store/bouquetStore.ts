@@ -85,10 +85,24 @@ export const useBouquetStore = create<BouquetStore>()(
       addFlower: (flower) => {
         const { currentBouquet } = get();
         if (currentBouquet) {
+          const currentFlowers = currentBouquet.flowers;
+          const index = currentFlowers.length;
+
+          // Auto-position new flower in radial arrangement if position not provided
+          const finalFlower = {
+            ...flower,
+            position: flower.position || {
+              x: index === 0 ? 0 : Math.cos((index / (currentFlowers.length + 1)) * Math.PI * 2) * 0.15,
+              y: -0.5 + (index * 0.05), // Slight height variation
+              z: index === 0 ? 0 : Math.sin((index / (currentFlowers.length + 1)) * Math.PI * 2) * 0.15,
+            },
+            rotation: flower.rotation ?? (index * 45), // Default rotation variation
+          };
+
           set({
             currentBouquet: {
               ...currentBouquet,
-              flowers: [...currentBouquet.flowers, flower],
+              flowers: [...currentFlowers, finalFlower],
               updatedAt: new Date(),
             },
           });

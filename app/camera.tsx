@@ -1,15 +1,17 @@
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert, PanResponder } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert, PanResponder, Modal, ScrollView, Image } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useBouquetStore } from '@/store/bouquetStore';
 import { BackgroundGradient } from '@/components/BackgroundGradient';
-import { extractFlowerInfo } from '@/utils/colorExtractor';
-import { getFlowerModel } from '@/utils/modelRegistry';
+import { extractDominantColor } from '@/utils/colorExtractor';
+import { getFlowerModel, FLOWER_MODELS } from '@/utils/modelRegistry';
 import { GLView } from 'expo-gl';
 import { Renderer } from 'expo-three';
 import * as THREE from 'three';
+import { LinearGradient } from 'expo-linear-gradient';
+import { detectFlowerML, preloadMLModel, isMLModelReady } from '@/utils/mlFlowerDetector';
 
 export default function CameraScreen() {
   const router = useRouter();
@@ -20,7 +22,36 @@ export default function CameraScreen() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [showARModel, setShowARModel] = useState(false);
   const [isLoadingModel, setIsLoadingModel] = useState(false);
+  const [showFlowerSelection, setShowFlowerSelection] = useState(false);
+  const [capturedImageUri, setCapturedImageUri] = useState<string | null>(null);
+  const [extractedColor, setExtractedColor] = useState<string>('#FF5C8A');
+  const [mlDetectionResult, setMlDetectionResult] = useState<any>(null);
+  const [useMLDetection, setUseMLDetection] = useState(true);
   const { setDetectedFlower, detectedFlower } = useBouquetStore();
+
+  // Preload ML model on mount
+  useEffect(() => {
+    const initML = async () => {
+      try {
+        console.log('🤖 Preloading ML model...');
+        await preloadMLModel();
+        console.log('✅ ML model ready for detection');
+      } catch (error) {
+        console.warn('⚠️ ML model preload failed, will use manual selection:', error);
+        setUseMLDetection(false);
+      }
+    };
+
+    initML();
+  }, []);
+
+  // Available flower types for selection
+  const flowerOptions = [
+    { type: 'rose', name: 'Rose', emoji: '🌹', color: '#DC143C' },
+    { type: 'tulip', name: 'Tulip', emoji: '🌷', color: '#FF69B4' },
+    { type: 'sunflower', name: 'Sunflower', emoji: '🌻', color: '#FFD700' },
+    { type: 'cherry-blossom', name: 'Cherry Blossom', emoji: '🌸', color: '#FFB7C5' },
+  ];
 
   const modelRef = useRef<THREE.Group | null>(null);
   const rotationRef = useRef({ x: 0, y: 0 });
@@ -107,24 +138,39 @@ export default function CameraScreen() {
         to: savedPath,
       });
 
-      // Extract flower information (color + type detection)
-      console.log('🔍 Analyzing captured flower...');
-      const flowerInfo = await extractFlowerInfo(savedPath);
-      console.log('✅ Detection complete:', flowerInfo);
+      // Try ML detection first if enabled and model is ready
+      if (useMLDetection && isMLModelReady()) {
+        console.log('🤖 Running ML flower detection...');
+        try {
+          const mlResult = await detectFlowerML(savedPath);
+          setMlDetectionResult(mlResult);
+          setExtractedColor(mlResult.color);
 
-      // Store detected flower info with all required fields
-      setDetectedFlower({
-        color: flowerInfo.color,
-        flowerType: flowerInfo.flowerType,
-        flowerName: flowerInfo.flowerName,
-        shape: 'round', // Default shape
-        confidence: 0.8, // Default confidence
-        imageUri: savedPath,
-        detectedAt: Date.now(),
-      });
+          // If confidence is high enough, use ML result directly
+          if (mlResult.confidence > 0.6) {
+            console.log(`✅ High confidence ML detection (${(mlResult.confidence * 100).toFixed(1)}%): ${mlResult.flowerName}`);
 
-      // Show AR model overlay
-      setShowARModel(true);
+            // Store detected flower and navigate to AR preview
+            setDetectedFlower(mlResult);
+            router.push('/ar-preview');
+            return;
+          } else {
+            console.log(`⚠️ Low confidence ML detection (${(mlResult.confidence * 100).toFixed(1)}%), showing manual selection`);
+          }
+        } catch (mlError) {
+          console.error('❌ ML detection failed:', mlError);
+        }
+      }
+
+      // Fallback: Extract color and show manual selection modal
+      console.log('🎨 Extracting color from captured image...');
+      const color = await extractDominantColor(savedPath);
+      console.log('✅ Color extracted:', color);
+
+      // Store the image URI and color, then show selection modal
+      setCapturedImageUri(savedPath);
+      setExtractedColor(color);
+      setShowFlowerSelection(true);
 
     } catch (error) {
       console.error('Error capturing image:', error);
@@ -138,6 +184,31 @@ export default function CameraScreen() {
     }
   };
 
+  // Handle flower type selection from modal
+  const handleFlowerSelect = (flowerType: string, flowerName: string) => {
+    if (!capturedImageUri) return;
+
+    console.log('🌸 User selected:', flowerName);
+
+    // Store detected flower info with user-selected type
+    setDetectedFlower({
+      color: extractedColor,
+      flowerType: flowerType,
+      flowerName: flowerName,
+      shape: 'round',
+      confidence: 1.0, // 100% confidence because user selected it
+      imageUri: capturedImageUri,
+      detectedAt: Date.now(),
+    });
+
+    // Hide selection modal
+    setShowFlowerSelection(false);
+
+    // Navigate to AR preview screen to view in AR/3D
+    console.log('📱 Navigating to AR preview screen...');
+    router.push('/ar-preview');
+  };
+
   const handleContinue = () => {
     // Navigate to editor with the detected flower
     router.push('/editor');
@@ -146,6 +217,8 @@ export default function CameraScreen() {
   const handleRetake = () => {
     // Hide AR model and allow retaking
     setShowARModel(false);
+    setShowFlowerSelection(false);
+    setCapturedImageUri(null);
     rotationRef.current = { x: 0, y: 0 };
   };
 
@@ -365,6 +438,65 @@ export default function CameraScreen() {
           </View>
         )}
       </CameraView>
+
+      {/* Flower Selection Modal */}
+      <Modal
+        visible={showFlowerSelection}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setShowFlowerSelection(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            {/* Header with captured image preview */}
+            <View style={styles.modalHeader}>
+              {capturedImageUri && (
+                <Image
+                  source={{ uri: capturedImageUri }}
+                  style={styles.capturedPreview}
+                  resizeMode="cover"
+                />
+              )}
+              <View style={styles.modalTitleContainer}>
+                <Text style={styles.modalTitle}>What flower is this?</Text>
+                <Text style={styles.modalSubtitle}>Select the correct flower type</Text>
+              </View>
+            </View>
+
+            {/* Flower Options */}
+            <ScrollView style={styles.flowerOptionsContainer} showsVerticalScrollIndicator={false}>
+              {flowerOptions.map((flower) => (
+                <TouchableOpacity
+                  key={flower.type}
+                  style={styles.flowerOption}
+                  onPress={() => handleFlowerSelect(flower.type, flower.name)}
+                  activeOpacity={0.7}
+                >
+                  <LinearGradient
+                    colors={[flower.color + '40', flower.color + '20']}
+                    style={styles.flowerOptionGradient}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 0 }}
+                  >
+                    <Text style={styles.flowerEmoji}>{flower.emoji}</Text>
+                    <Text style={styles.flowerName}>{flower.name}</Text>
+                    <View style={[styles.flowerColorDot, { backgroundColor: flower.color }]} />
+                  </LinearGradient>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            {/* Cancel Button */}
+            <TouchableOpacity
+              style={styles.cancelButton}
+              onPress={handleRetake}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.cancelButtonText}>Retake Photo</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -630,6 +762,95 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 16,
     marginTop: 16,
+    fontWeight: '600',
+  },
+  // Flower Selection Modal Styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: '#1A1A2E',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingTop: 20,
+    paddingBottom: 40,
+    paddingHorizontal: 20,
+    maxHeight: '80%',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  capturedPreview: {
+    width: 70,
+    height: 70,
+    borderRadius: 12,
+    marginRight: 16,
+  },
+  modalTitleContainer: {
+    flex: 1,
+  },
+  modalTitle: {
+    color: '#FFFFFF',
+    fontSize: 20,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  modalSubtitle: {
+    color: 'rgba(255, 255, 255, 0.6)',
+    fontSize: 14,
+  },
+  flowerOptionsContainer: {
+    maxHeight: 300,
+  },
+  flowerOption: {
+    marginBottom: 12,
+    borderRadius: 16,
+    overflow: 'hidden',
+  },
+  flowerOptionGradient: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  flowerEmoji: {
+    fontSize: 32,
+    marginRight: 16,
+  },
+  flowerName: {
+    flex: 1,
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '600',
+  },
+  flowerColorDot: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.3)',
+  },
+  cancelButton: {
+    marginTop: 16,
+    paddingVertical: 14,
+    alignItems: 'center',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  cancelButtonText: {
+    color: 'rgba(255, 255, 255, 0.7)',
+    fontSize: 16,
     fontWeight: '600',
   },
 });

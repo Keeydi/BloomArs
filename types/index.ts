@@ -2,16 +2,17 @@ export type BouquetCategory = 'Wedding' | 'Birthday' | 'Anniversary' | 'Valentin
 
 export interface Flower {
   id: string;
+  flowerType?: string; // Type of flower model (rose, tulip, sunflower, etc.)
   color: string;
   quantity: number;
   size: number;
   shape?: string;
-  position?: {
+  position: {
     x: number;
     y: number;
     z: number;
   };
-  rotation?: number;
+  rotation: number; // Rotation in degrees
 }
 
 export interface Ribbon {

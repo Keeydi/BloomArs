@@ -1,25 +1,174 @@
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { GLView } from 'expo-gl';
 import { Renderer } from 'expo-three';
 import { useBouquetStore } from '@/store/bouquetStore';
 import { LinearGradient } from 'expo-linear-gradient';
 import { getFlowerModel } from '@/utils/modelRegistry';
 import * as THREE from 'three';
+import { Canvas } from '@react-three/fiber';
+import { XR, createXRStore } from '@react-three/xr';
+import { checkARSupport, initializeAR, setXRSession, clearXRSession, hitTest } from '@/utils/arUtils';
+import { captureRef } from 'react-native-view-shot';
+import * as Sharing from 'expo-sharing';
+import * as MediaLibrary from 'expo-media-library';
+
+// XR Store for managing AR session
+const xrStore = createXRStore();
+
+// Component for visualizing detected ground planes
+function GroundPlane({ visible }: { visible: boolean }) {
+  if (!visible) return null;
+
+  return (
+    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.5, 0]} receiveShadow>
+      <planeGeometry args={[2, 2]} />
+      <meshStandardMaterial
+        color="#00ff00"
+        transparent
+        opacity={0.3}
+        side={THREE.DoubleSide}
+      />
+    </mesh>
+  );
+}
+
+// Component for rendering 3D flower model in AR
+function FlowerModel({ flowerType }: { flowerType: string }) {
+  const [model, setModel] = useState<THREE.Group | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const loadModel = async () => {
+      try {
+        const Asset = await import('expo-asset');
+        const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
+        const loader = new GLTFLoader();
+
+        const modelInfo = getFlowerModel(flowerType as any);
+        console.log('🌸 Loading AR model for:', modelInfo.displayName);
+
+        const modelAsset = Asset.Asset.fromModule(modelInfo.modelPath);
+        await modelAsset.downloadAsync();
+
+        loader.load(
+          modelAsset.localUri || modelAsset.uri,
+          (gltf: any) => {
+            const flowerModel = gltf.scene;
+
+            // Scale and position for AR
+            flowerModel.scale.set(0.3, 0.3, 0.3); // Smaller for real-world scale
+            flowerModel.position.set(0, 0, -1); // 1 meter in front
+
+            // Ensure materials render correctly
+            flowerModel.traverse((child: any) => {
+              if (child instanceof THREE.Mesh) {
+                if (child.material) {
+                  child.material.needsUpdate = true;
+                  child.castShadow = true;
+                  child.receiveShadow = true;
+                }
+              }
+            });
+
+            setModel(flowerModel);
+            setLoading(false);
+          },
+          undefined,
+          (error) => {
+            console.error('Error loading AR model:', error);
+            setLoading(false);
+          }
+        );
+      } catch (error) {
+        console.error('Error setting up AR model:', error);
+        setLoading(false);
+      }
+    };
+
+    loadModel();
+  }, [flowerType]);
+
+  if (loading || !model) {
+    return null;
+  }
+
+  return <primitive object={model} />;
+}
 
 export default function ARPreviewScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
-  const { detectedFlower } = useBouquetStore();
+  const { detectedFlower, currentBouquet } = useBouquetStore();
 
   const [isLoading, setIsLoading] = useState(true);
+  const [arSupported, setArSupported] = useState(false);
+  const [useARMode, setUseARMode] = useState(true); // Toggle between AR and 3D preview
+  const [arError, setArError] = useState<string | null>(null);
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [showPlanes, setShowPlanes] = useState(false); // Toggle plane visualization
+
+  // Refs
+  const viewRef = useRef<View>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const modelRef = useRef<THREE.Group | null>(null);
   const rotationRef = useRef({ x: 0, y: 0 });
-  const scaleRef = useRef(0.8); // Initial scale - smaller/zoomed out
+  const scaleRef = useRef(0.8);
+
+  // Check AR support on mount
+  useEffect(() => {
+    const checkSupport = async () => {
+      try {
+        const supported = await checkARSupport();
+        setArSupported(supported);
+
+        if (!supported) {
+          console.warn('AR not supported on this device, falling back to 3D preview');
+          setUseARMode(false);
+          setArError('AR not supported on this device');
+        } else {
+          const initialized = await initializeAR();
+          if (!initialized) {
+            console.warn('AR initialization failed, falling back to 3D preview');
+            setUseARMode(false);
+            setArError('AR initialization failed');
+          }
+        }
+      } catch (error) {
+        console.error('Error checking AR support:', error);
+        setUseARMode(false);
+        setArError('Error checking AR support');
+      }
+    };
+
+    checkSupport();
+
+    // Cleanup XR session on unmount
+    return () => {
+      clearXRSession();
+    };
+  }, []);
+
+  // Monitor XR session state
+  useEffect(() => {
+    const unsubscribe = xrStore.subscribe((state) => {
+      if (state.session) {
+        console.log('AR session started');
+        state.session.requestReferenceSpace('local').then((referenceSpace) => {
+          setXRSession(state.session!, referenceSpace);
+          setIsLoading(false);
+        });
+      } else {
+        console.log('AR session ended');
+        clearXRSession();
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
 
   const onContextCreate = async (gl: any) => {
     try {
@@ -161,37 +310,197 @@ export default function ARPreviewScreen() {
     router.back();
   };
 
-  return (
-    <View style={styles.container}>
-      {/* 3D View with touch controls */}
-      <GLView
-        style={styles.glView}
-        onContextCreate={onContextCreate}
-      />
+  const handleCaptureAndShare = async () => {
+    if (!viewRef.current) {
+      Alert.alert('Error', 'Unable to capture screen');
+      return;
+    }
 
+    try {
+      setIsCapturing(true);
+
+      // Request media library permissions
+      const { status } = await MediaLibrary.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert(
+          'Permission Required',
+          'Please grant permission to save photos to your library'
+        );
+        setIsCapturing(false);
+        return;
+      }
+
+      // Capture the AR/3D view
+      const uri = await captureRef(viewRef, {
+        format: 'png',
+        quality: 0.9,
+      });
+
+      console.log('📸 Screenshot captured:', uri);
+
+      // Save to media library
+      await MediaLibrary.saveToLibraryAsync(uri);
+
+      // Share if available
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(uri, {
+          mimeType: 'image/png',
+          dialogTitle: 'Share your BloomAR bouquet',
+        });
+      }
+
+      Alert.alert('Success', 'Bouquet saved to gallery!');
+    } catch (error) {
+      console.error('❌ Capture error:', error);
+      Alert.alert('Error', 'Failed to capture image. Please try again.');
+    } finally {
+      setIsCapturing(false);
+    }
+  };
+
+  const flowerType = detectedFlower?.flowerType || 'generic-flower';
+  const flowerName = detectedFlower?.flowerName || 'Flower';
+  const modelInfo = getFlowerModel(flowerType as any);
+
+  // Get all flowers from current bouquet (multi-flower support)
+  const flowers = currentBouquet?.flowers || [];
+  const hasMultipleFlowers = flowers.length > 0;
+
+  // Use bouquet flowers if available, otherwise show single detected flower
+  const flowersToRender = hasMultipleFlowers
+    ? flowers.map(f => ({
+        flowerType: f.flowerType || 'generic-flower',
+        position: f.position,
+        rotation: f.rotation,
+        scale: f.size,
+      }))
+    : [{
+        flowerType,
+        position: { x: 0, y: 0, z: -1 },
+        rotation: 0,
+        scale: 0.3,
+      }];
+
+  return (
+    <View style={styles.container} ref={viewRef} collapsable={false}>
+      {/* Render AR mode or fallback 3D preview */}
+      {useARMode && arSupported ? (
+        <>
+          {/* WebXR AR View */}
+          <Canvas
+            style={styles.glView}
+            gl={{ alpha: true }}
+          >
+            <XR store={xrStore}>
+              {/* Lighting */}
+              <ambientLight intensity={0.6} />
+              <directionalLight position={[5, 10, 7.5]} intensity={0.8} castShadow />
+
+              {/* Ground plane visualization (optional) */}
+              <GroundPlane visible={showPlanes} />
+
+              {/* Render all flowers in AR */}
+              {flowersToRender.map((flower, index) => (
+                <group
+                  key={index}
+                  position={[flower.position.x, flower.position.y, flower.position.z]}
+                  rotation={[0, (flower.rotation * Math.PI) / 180, 0]}
+                  scale={[flower.scale, flower.scale, flower.scale]}
+                >
+                  <FlowerModel flowerType={flower.flowerType} />
+                </group>
+              ))}
+            </XR>
+          </Canvas>
+
+          {/* AR Entry Button */}
+          <View style={styles.arEntryContainer}>
+            <TouchableOpacity
+              style={styles.arEntryButton}
+              onPress={() => xrStore.enterAR()}
+            >
+              <LinearGradient
+                colors={['#FFD166', '#FFB84D']}
+                style={styles.primaryButtonGradient}
+              >
+                <Text style={styles.primaryButtonText}>Enter AR Mode</Text>
+              </LinearGradient>
+            </TouchableOpacity>
+            <Text style={styles.arEntryHint}>
+              Place your flower in the real world
+            </Text>
+          </View>
+        </>
+      ) : (
+        <>
+          {/* Fallback: Traditional 3D View */}
+          <GLView
+            style={styles.glView}
+            onContextCreate={onContextCreate}
+          />
+
+          {arError && (
+            <View style={styles.warningBadge}>
+              <Text style={styles.warningText}>
+                {arError} - Using 3D preview mode
+              </Text>
+            </View>
+          )}
+        </>
+      )}
 
       {/* Loading overlay */}
       {isLoading && (
         <View style={styles.loadingOverlay} pointerEvents="none">
           <ActivityIndicator size="large" color="#FFD166" />
-          <Text style={styles.loadingText}>Loading 3D Preview...</Text>
+          <Text style={styles.loadingText}>
+            {useARMode ? 'Initializing AR...' : 'Loading 3D Preview...'}
+          </Text>
         </View>
       )}
 
       {/* Top overlay */}
       <View style={styles.topOverlay} pointerEvents="box-none">
         <View style={styles.infoBadge}>
-          <Text style={styles.infoText}>AR Preview</Text>
+          <Text style={styles.infoText}>
+            {useARMode && arSupported ? 'AR Preview' : '3D Preview'}
+          </Text>
         </View>
+
+        {/* Capture button */}
+        <TouchableOpacity
+          style={styles.captureButton}
+          onPress={handleCaptureAndShare}
+          disabled={isCapturing}
+        >
+          <Text style={styles.captureButtonText}>
+            {isCapturing ? '📸 Saving...' : '📸 Capture & Share'}
+          </Text>
+        </TouchableOpacity>
+
+        {/* Plane toggle (only in AR mode) */}
+        {useARMode && arSupported && (
+          <TouchableOpacity
+            style={styles.planeToggleButton}
+            onPress={() => setShowPlanes(!showPlanes)}
+          >
+            <Text style={styles.planeToggleText}>
+              {showPlanes ? '🟢 Hide Surfaces' : '⚪ Show Surfaces'}
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* Instructions */}
       <View style={styles.instructionsContainer} pointerEvents="none">
         <Text style={styles.instructionsText}>
-          {getFlowerModel(detectedFlower?.flowerType as any || 'generic-flower').emoji} 3D {detectedFlower?.flowerName || 'Flower'} Preview
+          {modelInfo.emoji} {useARMode ? 'AR' : '3D'} {hasMultipleFlowers ? 'Bouquet' : flowerName} Preview
         </Text>
         <Text style={styles.instructionsSubtext}>
-          View your flower in 3D
+          {hasMultipleFlowers && `${flowers.length} flowers • `}
+          {useARMode && arSupported
+            ? 'Tap "Enter AR" to place in real world'
+            : 'View your bouquet in 3D'}
         </Text>
       </View>
 
@@ -357,5 +666,85 @@ const styles = StyleSheet.create({
     fontSize: 13,
     textAlign: 'center',
     lineHeight: 18,
+  },
+  arEntryContainer: {
+    position: 'absolute',
+    bottom: 100,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    zIndex: 150,
+  },
+  arEntryButton: {
+    width: '100%',
+    borderRadius: 12,
+    overflow: 'hidden',
+    shadowColor: '#FFD166',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  arEntryHint: {
+    color: 'rgba(255, 255, 255, 0.9)',
+    fontSize: 14,
+    textAlign: 'center',
+    marginTop: 12,
+    fontWeight: '600',
+    textShadowColor: 'rgba(0, 0, 0, 0.75)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  warningBadge: {
+    position: 'absolute',
+    top: 120,
+    left: 20,
+    right: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 165, 0, 0.9)',
+    zIndex: 5,
+  },
+  warningText: {
+    color: '#000000',
+    fontSize: 12,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  captureButton: {
+    marginTop: 12,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(255, 209, 102, 0.9)',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 20,
+    shadowColor: '#FFD166',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  captureButtonText: {
+    color: '#000000',
+    fontSize: 14,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  planeToggleButton: {
+    marginTop: 8,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.3)',
+  },
+  planeToggleText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '600',
   },
 });

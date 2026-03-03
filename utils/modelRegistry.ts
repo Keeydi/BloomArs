@@ -16,7 +16,7 @@ interface FlowerModelInfo {
  * Registry of available 3D models
  * Add your GLB files to assets/models/ and register them here
  */
-const FLOWER_MODELS: Record<FlowerModelType, FlowerModelInfo> = {
+export const FLOWER_MODELS: Record<FlowerModelType, FlowerModelInfo> = {
   'tulip': {
     type: 'tulip',
     displayName: 'Tulip',
