@@ -74,21 +74,7 @@ export default function CameraScreen() {
   const [capturedImageUri, setCapturedImageUri] = useState<string | null>(null);
   const [extractedColor, setExtractedColor] = useState<string>('#FF5C8A');
   const [mlDetectionResult, setMlDetectionResult] = useState<any>(null);
-  const [tfReady, setTfReady] = useState(false);
   const { setDetectedFlower, detectedFlower } = useBouquetStore();
-
-  // Pre-initialize TF.js on mount so it's ready when the user takes a photo
-  useEffect(() => {
-    import('@tensorflow/tfjs').then(tf => {
-      tf.ready().then(() => {
-        setTfReady(true);
-        console.log('✅ TF.js ready');
-      }).catch(err => {
-        console.warn('⚠️ TF.js init failed:', err);
-        setTfReady(true); // still allow detection attempt
-      });
-    });
-  }, []);
 
   // Available flower types for selection
   const flowerOptions = [

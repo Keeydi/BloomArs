@@ -1,4 +1,4 @@
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert, PanResponder } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert, PanResponder, Dimensions } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useState, useRef, useEffect } from 'react';
 import { GLView } from 'expo-gl';
@@ -11,6 +11,8 @@ import * as THREE from 'three';
 import { captureRef } from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import * as MediaLibrary from 'expo-media-library';
+import { Asset } from 'expo-asset';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 export default function ARPreviewScreen() {
   const router = useRouter();
@@ -18,6 +20,7 @@ export default function ARPreviewScreen() {
   const { detectedFlower, currentBouquet } = useBouquetStore();
 
   const [isLoading, setIsLoading] = useState(true);
+  const [loadingStatus, setLoadingStatus] = useState('Initializing...');
   const [isCapturing, setIsCapturing] = useState(false);
 
   // Refs
@@ -93,7 +96,7 @@ export default function ARPreviewScreen() {
         0.1,
         1000
       );
-      camera.position.z = 5;
+      camera.position.z = 3; // Closer to model
       cameraRef.current = camera;
 
       // Add lighting
@@ -136,32 +139,48 @@ export default function ARPreviewScreen() {
         return;
       }
 
-      // Load assets
-      const Asset = await import('expo-asset');
-      const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
+      setLoadingStatus('Loading 3D models...');
+
+      // Create loader instance (GLTFLoader is pre-imported at top)
       const loader = new GLTFLoader();
 
       // Helper: load a GLB model by flower type, returns a Three.Group
       const loadModel = (type: string): Promise<THREE.Group> =>
         new Promise((resolve, reject) => {
           const info = getFlowerModel(type as any);
-          const asset = Asset.Asset.fromModule(info.modelPath);
+          const asset = Asset.fromModule(info.modelPath);
           asset.downloadAsync().then(() => {
-            loader.load(asset.localUri || asset.uri, (gltf: any) => resolve(gltf.scene), undefined, reject);
+            loader.load(
+              asset.localUri || asset.uri,
+              (gltf: any) => resolve(gltf.scene),
+              undefined,
+              reject
+            );
           }).catch(reject);
         });
 
-      // Pre-load one model per unique flower type (then clone for each flower)
+      // Pre-load all unique flower types IN PARALLEL for faster loading
       const uniqueTypes = [...new Set(flowersToRender.map(f => f.flowerType))];
       const typeToModel: Record<string, THREE.Group> = {};
-      for (const type of uniqueTypes) {
+
+      // Load all models in parallel using Promise.all
+      const modelPromises = uniqueTypes.map(async (type) => {
         try {
-          typeToModel[type] = await loadModel(type);
+          const model = await loadModel(type);
           console.log('✅ Loaded model for:', type);
+          return { type, model };
         } catch (e) {
           console.warn('⚠️ Failed to load model for:', type, e);
+          return { type, model: null };
         }
-      }
+      });
+
+      const loadedModels = await Promise.all(modelPromises);
+      loadedModels.forEach(({ type, model }) => {
+        if (model) typeToModel[type] = model;
+      });
+
+      setLoadingStatus('Rendering...');
 
       // Instantiate each flower in the bouquet
       for (const flower of flowersToRender) {
@@ -182,7 +201,7 @@ export default function ARPreviewScreen() {
         });
 
         instance.position.set(flower.position.x, flower.position.y, flower.position.z);
-        instance.scale.setScalar(flower.size * 0.8);
+        instance.scale.setScalar(flower.size * 1.0);
         instance.rotation.y = (flower.rotation * Math.PI) / 180;
 
         bouquetGroup.add(instance);
@@ -215,8 +234,10 @@ export default function ARPreviewScreen() {
   };
 
   const handleRetake = () => {
-    // Go back to camera
-    router.back();
+    // Clear detected flower and go back to camera with fresh state
+    const { setDetectedFlower } = useBouquetStore.getState();
+    setDetectedFlower(null);
+    router.replace('/camera');
   };
 
   const handleCaptureAndShare = async () => {
@@ -292,13 +313,15 @@ export default function ARPreviewScreen() {
 
   return (
     <View style={styles.container} ref={viewRef} collapsable={false}>
-      {/* Live camera feed as AR background */}
-      <CameraView style={StyleSheet.absoluteFill} facing="back" />
+      {/* Live camera feed as AR background - full screen */}
+      <View style={styles.cameraContainer}>
+        <CameraView style={styles.fullScreenCamera} facing="back" />
+      </View>
 
-      {/* 3D model overlay on top of camera */}
-      <View style={styles.glView} {...panResponder.panHandlers}>
+      {/* 3D model overlay on top of camera - absolute positioned */}
+      <View style={styles.glOverlay} {...panResponder.panHandlers}>
         <GLView
-          style={StyleSheet.absoluteFill}
+          style={styles.glView}
           onContextCreate={onContextCreate}
         />
       </View>
@@ -306,8 +329,13 @@ export default function ARPreviewScreen() {
       {/* Loading overlay */}
       {isLoading && (
         <View style={styles.loadingOverlay} pointerEvents="none">
-          <ActivityIndicator size="large" color="#FFD166" />
-          <Text style={styles.loadingText}>Loading 3D Preview...</Text>
+          <View style={styles.loadingContent}>
+            <ActivityIndicator size="large" color="#FFD166" />
+            <Text style={styles.loadingText}>{loadingStatus}</Text>
+            <View style={styles.loadingDots}>
+              <Text style={styles.loadingDotsText}>Please wait</Text>
+            </View>
+          </View>
         </View>
       )}
 
@@ -354,13 +382,33 @@ export default function ARPreviewScreen() {
   );
 }
 
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 1)', // Solid black, gestures handled here
+    backgroundColor: '#000000',
+  },
+  cameraContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: SCREEN_WIDTH,
+    height: SCREEN_HEIGHT,
+    zIndex: 0,
+  },
+  fullScreenCamera: {
+    width: SCREEN_WIDTH,
+    height: SCREEN_HEIGHT,
+  },
+  glOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 1,
   },
   glView: {
     flex: 1,
+    width: '100%',
+    height: '100%',
   },
   touchOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -369,16 +417,29 @@ const styles = StyleSheet.create({
   },
   loadingOverlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    backgroundColor: 'rgba(0, 0, 0, 0.85)',
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 10,
   },
+  loadingContent: {
+    alignItems: 'center',
+    padding: 30,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+  },
   loadingText: {
-    color: '#FFFFFF',
-    fontSize: 16,
+    color: '#FFD166',
+    fontSize: 18,
     marginTop: 16,
-    fontWeight: '600',
+    fontWeight: '700',
+  },
+  loadingDots: {
+    marginTop: 8,
+  },
+  loadingDotsText: {
+    color: 'rgba(255, 255, 255, 0.6)',
+    fontSize: 14,
   },
   topOverlay: {
     position: 'absolute',

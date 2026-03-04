@@ -1,14 +1,11 @@
 /**
  * Flower detection using color analysis
- * Uses TF.js decodeJpeg to properly read actual pixel data from images.
+ * Uses expo-image-manipulator + jpeg-js to extract dominant color from images.
  */
 
-import * as tf from '@tensorflow/tfjs';
-import '@tensorflow/tfjs-react-native';
-// Static import — dynamic require() inside async functions is unreliable with Metro bundler
-import { decodeJpeg } from '@tensorflow/tfjs-react-native';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as jpeg from 'jpeg-js';
 
 export type FlowerType = 'rose' | 'tulip' | 'sunflower' | 'cherry-blossom' | 'generic-flower';
 
@@ -19,19 +16,6 @@ interface FlowerMatchResult {
   color: string;
 }
 
-/**
- * Convert base64 string to Uint8Array using atob (available in React Native).
- * Replaces tf.util.encodeString which is unreliable across TF.js versions.
- */
-function base64ToBytes(base64: string): Uint8Array {
-  const binaryStr = atob(base64);
-  const bytes = new Uint8Array(binaryStr.length);
-  for (let i = 0; i < binaryStr.length; i++) {
-    bytes[i] = binaryStr.charCodeAt(i);
-  }
-  return bytes;
-}
-
 function rgbToHex(r: number, g: number, b: number): string {
   return '#' + [r, g, b]
     .map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0'))
@@ -40,49 +24,79 @@ function rgbToHex(r: number, g: number, b: number): string {
 }
 
 /**
- * Extract average RGB from image using TF.js decodeJpeg.
- * This correctly reads actual pixel data unlike PNG binary parsing.
+ * Convert base64 string to Uint8Array
+ */
+function base64ToUint8Array(base64: string): Uint8Array {
+  const binaryStr = atob(base64);
+  const bytes = new Uint8Array(binaryStr.length);
+  for (let i = 0; i < binaryStr.length; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/**
+ * Extract dominant color from image using jpeg-js decoder.
  */
 async function extractPixelColor(imageUri: string): Promise<{
   r: number; g: number; b: number; brightness: number; saturation: number;
 }> {
-  await tf.ready();
+  try {
+    console.log('🎨 Starting color extraction from:', imageUri);
 
-  // Resize to 50x50 JPEG — fast to process, good enough for color averaging
-  const manipResult = await manipulateAsync(
-    imageUri,
-    [{ resize: { width: 50, height: 50 } }],
-    { base64: false, format: SaveFormat.JPEG }
-  );
+    // Resize to small image for fast processing
+    const result = await manipulateAsync(
+      imageUri,
+      [{ resize: { width: 20, height: 20 } }],
+      { base64: true, format: SaveFormat.JPEG }
+    );
 
-  // Read JPEG file as base64, then convert to raw bytes
-  const imgB64 = await FileSystem.readAsStringAsync(manipResult.uri, {
-    encoding: FileSystem.EncodingType.Base64,
-  });
-  const raw = base64ToBytes(imgB64);
+    if (!result.base64) {
+      throw new Error('No base64 data from image manipulator');
+    }
 
-  // Decode JPEG bytes → pixel tensor [50, 50, 3]
-  const tensor = decodeJpeg(raw, 3);
+    console.log('📊 Got JPEG base64, length:', result.base64.length);
 
-  // Average all pixels → [3] mean RGB values
-  const meanTensor = tensor.mean([0, 1]);
-  const meanData = await meanTensor.data();
+    // Convert base64 to Uint8Array
+    const jpegData = base64ToUint8Array(result.base64);
+    console.log('📊 JPEG bytes:', jpegData.length);
 
-  tensor.dispose();
-  meanTensor.dispose();
+    // Decode JPEG to raw pixel data
+    const decoded = jpeg.decode(jpegData, { useTArray: true });
+    console.log('📊 Decoded image:', decoded.width, 'x', decoded.height, 'pixels');
 
-  const r = Math.round(meanData[0]);
-  const g = Math.round(meanData[1]);
-  const b = Math.round(meanData[2]);
+    if (!decoded.data || decoded.data.length === 0) {
+      throw new Error('No pixel data from jpeg decode');
+    }
 
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const brightness = (r + g + b) / 3;
-  const saturation = max === 0 ? 0 : (max - min) / max;
+    // Calculate average color from all pixels
+    let totalR = 0, totalG = 0, totalB = 0;
+    const pixelCount = decoded.width * decoded.height;
 
-  console.log('🎨 TF.js pixel color:', { r, g, b, brightness: brightness.toFixed(1), saturation: saturation.toFixed(2) });
+    // JPEG decoded data is RGBA format (4 bytes per pixel)
+    for (let i = 0; i < decoded.data.length; i += 4) {
+      totalR += decoded.data[i];
+      totalG += decoded.data[i + 1];
+      totalB += decoded.data[i + 2];
+      // decoded.data[i + 3] is alpha
+    }
 
-  return { r, g, b, brightness, saturation };
+    const r = Math.round(totalR / pixelCount);
+    const g = Math.round(totalG / pixelCount);
+    const b = Math.round(totalB / pixelCount);
+
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const brightness = (r + g + b) / 3;
+    const saturation = max === 0 ? 0 : (max - min) / max;
+
+    console.log('🎨 Extracted color:', { r, g, b, brightness: brightness.toFixed(1), saturation: saturation.toFixed(2) });
+
+    return { r, g, b, brightness, saturation };
+  } catch (error) {
+    console.error('❌ extractPixelColor error:', error);
+    throw error;
+  }
 }
 
 /**
@@ -105,35 +119,79 @@ export async function detectFlowerByImage(scannedImageUri: string): Promise<Flow
     brightness: brightness.toFixed(1), saturation: saturation.toFixed(2),
   });
 
-  // === SUNFLOWER — bright yellow (R ≈ G >> B) ===
-  if (r > 170 && g > 120 && b < 100 && g > b * 2 && r < g * 1.65) {
-    console.log('✅ DETECTED: Sunflower (bright yellow)');
+  // === SUNFLOWER — yellow detection (check FIRST before other flowers) ===
+  // Yellow/golden: high R and G, low B
+  // Key: Sunflower has yellow petals + brown center, so average may be orange-brown-yellow
+  // We need to detect BOTH pure yellow AND brownish-yellow (when whole flower is scanned)
+
+  // Bright yellow sunflower (R ≈ G >> B) - petals only
+  if (r > 150 && g > 100 && b < 120 && g > b * 1.5) {
+    console.log('✅ DETECTED: Sunflower (bright yellow petals)');
     return { type: 'sunflower', confidence: 0.9, displayName: 'Sunflower', color: hexColor };
   }
 
-  // === SUNFLOWER — golden/orange-yellow (R heavier, but B nearly absent) ===
-  // Catches deeper golden sunflowers where R/G > 1.65.
-  // Key discriminator vs rose: G must be > 2.5× B (roses have G ≈ B).
-  if (r > 160 && g > 90 && b < 70 && g > b * 2.5 && r < g * 2.0) {
-    console.log('✅ DETECTED: Sunflower (golden/orange-yellow)');
+  // Golden/orange-yellow sunflower (R > G >> B)
+  if (r > 140 && g > 80 && b < 100 && g > b * 1.3 && r > b * 1.5) {
+    console.log('✅ DETECTED: Sunflower (golden)');
     return { type: 'sunflower', confidence: 0.85, displayName: 'Sunflower', color: hexColor };
   }
 
-  // === CHERRY BLOSSOM — checked BEFORE rose ===
-  // Key signature: R dominant, AND both G >= 120 AND B >= 120 (all channels present — "warm full pink")
-  // Distinguished from:
-  //   Rose:          G and B are LOW (< 120) — red is strongly dominant
-  //   Magenta tulip: G is very LOW, B >> G (B > G*1.5)
+  // Brown-yellow mix (whole sunflower with brown center affecting average)
+  // Brown = R > G > B, with moderate values. Yellow influence keeps G relatively high.
+  // This catches cases where the brown center pulls down the brightness but R > G > B pattern remains
+  if (r > g && g > b && r > 100 && g > 60 && b < 100 && (r - b) > 40) {
+    console.log('✅ DETECTED: Sunflower (brown-yellow whole flower)');
+    return { type: 'sunflower', confidence: 0.8, displayName: 'Sunflower', color: hexColor };
+  }
+
+  // Orange-ish yellow (common when yellow petals + brown center average out)
+  if (r > 120 && g > 70 && b < 90 && r > g && g > b) {
+    console.log('✅ DETECTED: Sunflower (orange-yellow)');
+    return { type: 'sunflower', confidence: 0.75, displayName: 'Sunflower', color: hexColor };
+  }
+
+  // === CHERRY BLOSSOM — checked BEFORE rose and tulip ===
+  // Cherry blossom = PINK (soft pink, light pink, pastel pink)
+  // Key: R is highest, but G and B are also present (making it pink, not red)
+  // Pink signature: R > G, R > B, but G and B are relatively close to each other
+
+  console.log('🌸 Cherry blossom check:', {
+    rMinusG: r - g,
+    rMinusB: r - b,
+    gMinusB: Math.abs(g - b),
+    isPink: r > g && r > b && Math.abs(g - b) < 50
+  });
+
+  // Bright pink cherry blossom (R dominant, G and B balanced and high)
   if (isRedDominant && g >= 120 && b >= 120 && b <= g * 1.5 && brightness > 140) {
     const confidence = brightness > 170 ? 0.9 : 0.82;
-    console.log('✅ DETECTED: Cherry Blossom');
+    console.log('✅ DETECTED: Cherry Blossom (bright pink)');
     return { type: 'cherry-blossom', confidence, displayName: 'Cherry Blossom', color: hexColor };
+  }
+
+  // Medium pink cherry blossom (R dominant, G and B are close to each other)
+  // This catches pink where G and B are lower but balanced
+  if (isRedDominant && g >= 80 && b >= 80 && Math.abs(g - b) < 50 && brightness > 100) {
+    console.log('✅ DETECTED: Cherry Blossom (medium pink)');
+    return { type: 'cherry-blossom', confidence: 0.85, displayName: 'Cherry Blossom', color: hexColor };
+  }
+
+  // Light/soft pink cherry blossom (high brightness, low saturation, pinkish tint)
+  if (brightness > 150 && saturation < 0.4 && r > g && r > b && r > 150) {
+    console.log('✅ DETECTED: Cherry Blossom (soft pink)');
+    return { type: 'cherry-blossom', confidence: 0.8, displayName: 'Cherry Blossom', color: hexColor };
   }
 
   // Very pale / near-white cherry blossom
   if (brightness > 210 && saturation < 0.15) {
     console.log('✅ DETECTED: Cherry Blossom (white/pale)');
     return { type: 'cherry-blossom', confidence: 0.75, displayName: 'Cherry Blossom', color: hexColor };
+  }
+
+  // Pastel pink (common cherry blossom color - pinkish with balanced G and B)
+  if (r > 140 && g > 100 && b > 100 && r > g && r > b && Math.abs(g - b) < 40) {
+    console.log('✅ DETECTED: Cherry Blossom (pastel pink)');
+    return { type: 'cherry-blossom', confidence: 0.78, displayName: 'Cherry Blossom', color: hexColor };
   }
 
   // === ROSE — DARK RED ONLY ===
@@ -175,9 +233,9 @@ export async function detectFlowerByImage(scannedImageUri: string): Promise<Flow
   // === FALLBACKS — default to rose, NOT tulip ===
   // Any remaining red/warm/yellow color falls back to rose or sunflower, never tulip.
 
-  // Yellow/golden → sunflower fallback
-  if (r > 160 && g > 120 && b < 110 && r < g * 1.8) {
-    console.log('✅ DETECTED: Sunflower (fallback yellow/golden)');
+  // Yellow/golden → sunflower fallback (more relaxed conditions)
+  if (r > 120 && g > 90 && b < 130 && g > b && r > b) {
+    console.log('✅ DETECTED: Sunflower (fallback yellow/warm)');
     return { type: 'sunflower', confidence: 0.65, displayName: 'Sunflower', color: hexColor };
   }
 
