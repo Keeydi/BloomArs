@@ -7,6 +7,7 @@ import { Colors, PresetColors } from '@/constants/Colors';
 import { useEffect, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import { Ribbon } from '@/types';
+import { getFlowerModel } from '@/utils/modelRegistry';
 
 const RIBBON_STYLES: Ribbon['style'][] = ['Silk', 'Satin', 'Velvet', 'Lace'];
 const WRAPPER_STYLES = ['Classic', 'Modern', 'Rustic', 'Elegant'];
@@ -46,6 +47,7 @@ export default function EditorScreen() {
 
     const newFlower = {
       id: `flower-${Date.now()}-${Math.random()}`,
+      flowerType: localDetectedFlower.flowerType || 'rose',
       color: localDetectedFlower.color,
       quantity: 1,
       size: 1.0,
@@ -280,7 +282,7 @@ export default function EditorScreen() {
                     />
                     <View style={styles.flowerItemInfo}>
                       <Text style={styles.flowerItemText}>
-                        Flower {index + 1}
+                        {getFlowerModel(flower.flowerType as any).emoji} {getFlowerModel(flower.flowerType as any).displayName}
                       </Text>
                       <Text style={styles.flowerItemSubtext}>
                         Size: {flower.size.toFixed(1)}x • Qty: {flower.quantity}

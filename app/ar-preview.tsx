@@ -1,101 +1,16 @@
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert, PanResponder } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useState, useRef, useEffect } from 'react';
 import { GLView } from 'expo-gl';
 import { Renderer } from 'expo-three';
+import { CameraView } from 'expo-camera';
 import { useBouquetStore } from '@/store/bouquetStore';
 import { LinearGradient } from 'expo-linear-gradient';
 import { getFlowerModel } from '@/utils/modelRegistry';
 import * as THREE from 'three';
-import { Canvas } from '@react-three/fiber';
-import { XR, createXRStore } from '@react-three/xr';
-import { checkARSupport, initializeAR, setXRSession, clearXRSession, hitTest } from '@/utils/arUtils';
 import { captureRef } from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import * as MediaLibrary from 'expo-media-library';
-
-// XR Store for managing AR session
-const xrStore = createXRStore();
-
-// Component for visualizing detected ground planes
-function GroundPlane({ visible }: { visible: boolean }) {
-  if (!visible) return null;
-
-  return (
-    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.5, 0]} receiveShadow>
-      <planeGeometry args={[2, 2]} />
-      <meshStandardMaterial
-        color="#00ff00"
-        transparent
-        opacity={0.3}
-        side={THREE.DoubleSide}
-      />
-    </mesh>
-  );
-}
-
-// Component for rendering 3D flower model in AR
-function FlowerModel({ flowerType }: { flowerType: string }) {
-  const [model, setModel] = useState<THREE.Group | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const loadModel = async () => {
-      try {
-        const Asset = await import('expo-asset');
-        const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
-        const loader = new GLTFLoader();
-
-        const modelInfo = getFlowerModel(flowerType as any);
-        console.log('🌸 Loading AR model for:', modelInfo.displayName);
-
-        const modelAsset = Asset.Asset.fromModule(modelInfo.modelPath);
-        await modelAsset.downloadAsync();
-
-        loader.load(
-          modelAsset.localUri || modelAsset.uri,
-          (gltf: any) => {
-            const flowerModel = gltf.scene;
-
-            // Scale and position for AR
-            flowerModel.scale.set(0.3, 0.3, 0.3); // Smaller for real-world scale
-            flowerModel.position.set(0, 0, -1); // 1 meter in front
-
-            // Ensure materials render correctly
-            flowerModel.traverse((child: any) => {
-              if (child instanceof THREE.Mesh) {
-                if (child.material) {
-                  child.material.needsUpdate = true;
-                  child.castShadow = true;
-                  child.receiveShadow = true;
-                }
-              }
-            });
-
-            setModel(flowerModel);
-            setLoading(false);
-          },
-          undefined,
-          (error) => {
-            console.error('Error loading AR model:', error);
-            setLoading(false);
-          }
-        );
-      } catch (error) {
-        console.error('Error setting up AR model:', error);
-        setLoading(false);
-      }
-    };
-
-    loadModel();
-  }, [flowerType]);
-
-  if (loading || !model) {
-    return null;
-  }
-
-  return <primitive object={model} />;
-}
 
 export default function ARPreviewScreen() {
   const router = useRouter();
@@ -103,11 +18,7 @@ export default function ARPreviewScreen() {
   const { detectedFlower, currentBouquet } = useBouquetStore();
 
   const [isLoading, setIsLoading] = useState(true);
-  const [arSupported, setArSupported] = useState(false);
-  const [useARMode, setUseARMode] = useState(true); // Toggle between AR and 3D preview
-  const [arError, setArError] = useState<string | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
-  const [showPlanes, setShowPlanes] = useState(false); // Toggle plane visualization
 
   // Refs
   const viewRef = useRef<View>(null);
@@ -118,68 +29,61 @@ export default function ARPreviewScreen() {
   const rotationRef = useRef({ x: 0, y: 0 });
   const scaleRef = useRef(0.8);
 
-  // Check AR support on mount
-  useEffect(() => {
-    const checkSupport = async () => {
-      try {
-        const supported = await checkARSupport();
-        setArSupported(supported);
-
-        if (!supported) {
-          console.warn('AR not supported on this device, falling back to 3D preview');
-          setUseARMode(false);
-          setArError('AR not supported on this device');
-        } else {
-          const initialized = await initializeAR();
-          if (!initialized) {
-            console.warn('AR initialization failed, falling back to 3D preview');
-            setUseARMode(false);
-            setArError('AR initialization failed');
-          }
+  // Pan responder for rotation and scaling
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: () => {},
+      onPanResponderMove: (evt, gestureState) => {
+        // Single finger drag = rotate
+        if (evt.nativeEvent.touches.length === 1) {
+          rotationRef.current.y += gestureState.dx * 0.01;
+          rotationRef.current.x += gestureState.dy * 0.01;
         }
-      } catch (error) {
-        console.error('Error checking AR support:', error);
-        setUseARMode(false);
-        setArError('Error checking AR support');
-      }
-    };
-
-    checkSupport();
-
-    // Cleanup XR session on unmount
-    return () => {
-      clearXRSession();
-    };
-  }, []);
-
-  // Monitor XR session state
-  useEffect(() => {
-    const unsubscribe = xrStore.subscribe((state) => {
-      if (state.session) {
-        console.log('AR session started');
-        state.session.requestReferenceSpace('local').then((referenceSpace) => {
-          setXRSession(state.session!, referenceSpace);
-          setIsLoading(false);
-        });
-      } else {
-        console.log('AR session ended');
-        clearXRSession();
-      }
-    });
-
-    return () => unsubscribe();
-  }, []);
+        // Two finger pinch = scale (simplified)
+        else if (evt.nativeEvent.touches.length === 2) {
+          const scale = scaleRef.current + gestureState.dy * 0.001;
+          scaleRef.current = Math.max(0.3, Math.min(2, scale)); // Clamp between 0.3 and 2
+        }
+      },
+      onPanResponderRelease: () => {},
+    })
+  ).current;
 
   const onContextCreate = async (gl: any) => {
     try {
-      // Create renderer
-      const renderer = new Renderer({ gl });
+      // Polyfill getShaderPrecisionFormat — can return null on some Android devices
+      const _origPrecision = gl.getShaderPrecisionFormat?.bind(gl);
+      if (_origPrecision) {
+        gl.getShaderPrecisionFormat = (shaderType: number, precisionType: number) => {
+          const result = _origPrecision(shaderType, precisionType);
+          return result ?? { rangeMin: 1, rangeMax: 1, precision: 1 };
+        };
+      }
+
+      // Polyfill getShaderInfoLog — returns null on some Android devices;
+      // Three.js calls .trim() on the result which crashes if null
+      const _origShaderInfoLog = gl.getShaderInfoLog?.bind(gl);
+      if (_origShaderInfoLog) {
+        gl.getShaderInfoLog = (shader: WebGLShader) => _origShaderInfoLog(shader) ?? '';
+      }
+
+      // Polyfill getProgramInfoLog — same null issue on some Android devices
+      const _origProgramInfoLog = gl.getProgramInfoLog?.bind(gl);
+      if (_origProgramInfoLog) {
+        gl.getProgramInfoLog = (program: WebGLProgram) => _origProgramInfoLog(program) ?? '';
+      }
+
+      // Create renderer with alpha so the camera feed shows through
+      const renderer = new Renderer({ gl, alpha: true } as any);
       renderer.setSize(gl.drawingBufferWidth, gl.drawingBufferHeight);
+      renderer.setClearColor(0x000000, 0); // fully transparent clear
       rendererRef.current = renderer;
 
-      // Create scene
+      // Create scene — no background so the live camera shows through
       const scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x000000); // Black background
+      scene.background = null;
       sceneRef.current = scene;
 
       // Create camera
@@ -200,100 +104,105 @@ export default function ARPreviewScreen() {
       directionalLight.position.set(5, 10, 7.5);
       scene.add(directionalLight);
 
-      // Load the GLB model based on detected flower type
+      // Parent group — touch gestures rotate/scale the whole bouquet
+      const bouquetGroup = new THREE.Group();
+      scene.add(bouquetGroup);
+      modelRef.current = bouquetGroup;
+
+      // Determine flowers to render:
+      //   - If bouquet has flowers (came from editor), use those (with customized colors)
+      //   - Otherwise fall back to the freshly detected flower (came directly from camera)
+      const bouquetFlowers = currentBouquet?.flowers ?? [];
+      const flowersToRender = bouquetFlowers.length > 0
+        ? bouquetFlowers.map(f => ({
+            flowerType: f.flowerType || 'rose',
+            color: f.color,
+            size: f.size,
+            position: f.position,
+            rotation: f.rotation,
+          }))
+        : detectedFlower
+          ? [{
+              flowerType: detectedFlower.flowerType || 'rose',
+              color: detectedFlower.color,
+              size: 0.8,
+              position: { x: 0, y: -1, z: 0 },
+              rotation: 0,
+            }]
+          : [];
+
+      if (flowersToRender.length === 0) {
+        setIsLoading(false);
+        return;
+      }
+
+      // Load assets
       const Asset = await import('expo-asset');
       const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
       const loader = new GLTFLoader();
 
-      // Get the appropriate model for detected flower type
-      const flowerType = detectedFlower?.flowerType || 'generic-flower';
-      const modelInfo = getFlowerModel(flowerType as any);
+      // Helper: load a GLB model by flower type, returns a Three.Group
+      const loadModel = (type: string): Promise<THREE.Group> =>
+        new Promise((resolve, reject) => {
+          const info = getFlowerModel(type as any);
+          const asset = Asset.Asset.fromModule(info.modelPath);
+          asset.downloadAsync().then(() => {
+            loader.load(asset.localUri || asset.uri, (gltf: any) => resolve(gltf.scene), undefined, reject);
+          }).catch(reject);
+        });
 
-      console.log('🌸 Loading 3D model for:', modelInfo.displayName);
-
-      const modelAsset = Asset.Asset.fromModule(modelInfo.modelPath);
-      await modelAsset.downloadAsync();
-
-      // Suppress console errors for texture loading (we're using our own textures)
-      const originalError = console.error;
-      console.error = (...args: any[]) => {
-        if (args[0]?.includes?.('THREE.GLTFLoader: Couldn\'t load texture')) {
-          return; // Suppress this specific error
+      // Pre-load one model per unique flower type (then clone for each flower)
+      const uniqueTypes = [...new Set(flowersToRender.map(f => f.flowerType))];
+      const typeToModel: Record<string, THREE.Group> = {};
+      for (const type of uniqueTypes) {
+        try {
+          typeToModel[type] = await loadModel(type);
+          console.log('✅ Loaded model for:', type);
+        } catch (e) {
+          console.warn('⚠️ Failed to load model for:', type, e);
         }
-        originalError(...args);
+      }
+
+      // Instantiate each flower in the bouquet
+      for (const flower of flowersToRender) {
+        const baseModel = typeToModel[flower.flowerType];
+        if (!baseModel) continue;
+
+        // Clone so each instance has independent transforms/materials
+        const instance = baseModel.clone();
+
+        // Apply the flower's own color (user may have changed it in the editor)
+        instance.traverse((child: any) => {
+          if (child instanceof THREE.Mesh) {
+            child.material = new THREE.MeshBasicMaterial({
+              color: flower.color,
+              side: THREE.DoubleSide,
+            });
+          }
+        });
+
+        instance.position.set(flower.position.x, flower.position.y, flower.position.z);
+        instance.scale.setScalar(flower.size * 0.8);
+        instance.rotation.y = (flower.rotation * Math.PI) / 180;
+
+        bouquetGroup.add(instance);
+      }
+
+      setIsLoading(false);
+      console.log(`🌸 Rendered ${flowersToRender.length} flower(s) in bouquet`);
+
+      // Animation loop — gestures rotate/scale the whole bouquet group
+      const animate = () => {
+        requestAnimationFrame(animate);
+        if (modelRef.current) {
+          modelRef.current.rotation.x = rotationRef.current.x;
+          modelRef.current.rotation.y = rotationRef.current.y;
+          modelRef.current.scale.set(scaleRef.current, scaleRef.current, scaleRef.current);
+        }
+        renderer.render(scene, camera);
+        gl.endFrameEXP();
       };
-
-      loader.load(
-        modelAsset.localUri || modelAsset.uri,
-        (gltf: any) => {
-          // Restore console.error
-          console.error = originalError;
-          // Model loaded successfully
-          const flowerModel = gltf.scene;
-
-          // Scale and position the model - smaller initial scale
-          flowerModel.scale.set(0.8, 0.8, 0.8);
-          flowerModel.position.set(0, -1, 0);
-
-          // Ensure materials render correctly with textures
-          flowerModel.traverse((child: any) => {
-            if (child instanceof THREE.Mesh) {
-              if (child.material) {
-                child.material.needsUpdate = true;
-                child.castShadow = true;
-                child.receiveShadow = true;
-              }
-            }
-          });
-
-          scene.add(flowerModel);
-          modelRef.current = flowerModel;
-          setIsLoading(false);
-
-          // Animation loop with manual rotation and scale control
-          const animate = () => {
-            requestAnimationFrame(animate);
-
-            // Apply rotation and scale from touch gestures
-            if (modelRef.current) {
-              modelRef.current.rotation.x = rotationRef.current.x;
-              modelRef.current.rotation.y = rotationRef.current.y;
-              modelRef.current.scale.set(scaleRef.current, scaleRef.current, scaleRef.current);
-            }
-
-            renderer.render(scene, camera);
-            gl.endFrameEXP();
-          };
-
-          animate();
-        },
-        (progress) => {
-          // Loading progress
-          console.log('Loading model:', (progress.loaded / progress.total * 100).toFixed(2) + '%');
-        },
-        (error) => {
-          // Restore console.error
-          console.error = originalError;
-          console.error('Error loading GLB model:', error);
-          setIsLoading(false);
-
-          // Fallback: create a simple placeholder if model fails to load
-          const geometry = new THREE.SphereGeometry(1, 32, 32);
-          const material = new THREE.MeshStandardMaterial({
-            color: detectedFlower?.color || '#FFD166',
-          });
-          const sphere = new THREE.Mesh(geometry, material);
-          scene.add(sphere);
-
-          const animate = () => {
-            requestAnimationFrame(animate);
-            sphere.rotation.y += 0.01;
-            renderer.render(scene, camera);
-            gl.endFrameEXP();
-          };
-          animate();
-        }
-      );
+      animate();
     } catch (error) {
       console.error('Error setting up 3D scene:', error);
       setIsLoading(false);
@@ -383,124 +292,34 @@ export default function ARPreviewScreen() {
 
   return (
     <View style={styles.container} ref={viewRef} collapsable={false}>
-      {/* Render AR mode or fallback 3D preview */}
-      {useARMode && arSupported ? (
-        <>
-          {/* WebXR AR View */}
-          <Canvas
-            style={styles.glView}
-            gl={{ alpha: true }}
-          >
-            <XR store={xrStore}>
-              {/* Lighting */}
-              <ambientLight intensity={0.6} />
-              <directionalLight position={[5, 10, 7.5]} intensity={0.8} castShadow />
+      {/* Live camera feed as AR background */}
+      <CameraView style={StyleSheet.absoluteFill} facing="back" />
 
-              {/* Ground plane visualization (optional) */}
-              <GroundPlane visible={showPlanes} />
-
-              {/* Render all flowers in AR */}
-              {flowersToRender.map((flower, index) => (
-                <group
-                  key={index}
-                  position={[flower.position.x, flower.position.y, flower.position.z]}
-                  rotation={[0, (flower.rotation * Math.PI) / 180, 0]}
-                  scale={[flower.scale, flower.scale, flower.scale]}
-                >
-                  <FlowerModel flowerType={flower.flowerType} />
-                </group>
-              ))}
-            </XR>
-          </Canvas>
-
-          {/* AR Entry Button */}
-          <View style={styles.arEntryContainer}>
-            <TouchableOpacity
-              style={styles.arEntryButton}
-              onPress={() => xrStore.enterAR()}
-            >
-              <LinearGradient
-                colors={['#FFD166', '#FFB84D']}
-                style={styles.primaryButtonGradient}
-              >
-                <Text style={styles.primaryButtonText}>Enter AR Mode</Text>
-              </LinearGradient>
-            </TouchableOpacity>
-            <Text style={styles.arEntryHint}>
-              Place your flower in the real world
-            </Text>
-          </View>
-        </>
-      ) : (
-        <>
-          {/* Fallback: Traditional 3D View */}
-          <GLView
-            style={styles.glView}
-            onContextCreate={onContextCreate}
-          />
-
-          {arError && (
-            <View style={styles.warningBadge}>
-              <Text style={styles.warningText}>
-                {arError} - Using 3D preview mode
-              </Text>
-            </View>
-          )}
-        </>
-      )}
+      {/* 3D model overlay on top of camera */}
+      <View style={styles.glView} {...panResponder.panHandlers}>
+        <GLView
+          style={StyleSheet.absoluteFill}
+          onContextCreate={onContextCreate}
+        />
+      </View>
 
       {/* Loading overlay */}
       {isLoading && (
         <View style={styles.loadingOverlay} pointerEvents="none">
           <ActivityIndicator size="large" color="#FFD166" />
-          <Text style={styles.loadingText}>
-            {useARMode ? 'Initializing AR...' : 'Loading 3D Preview...'}
-          </Text>
+          <Text style={styles.loadingText}>Loading 3D Preview...</Text>
         </View>
       )}
 
-      {/* Top overlay */}
-      <View style={styles.topOverlay} pointerEvents="box-none">
-        <View style={styles.infoBadge}>
-          <Text style={styles.infoText}>
-            {useARMode && arSupported ? 'AR Preview' : '3D Preview'}
-          </Text>
-        </View>
-
-        {/* Capture button */}
-        <TouchableOpacity
-          style={styles.captureButton}
-          onPress={handleCaptureAndShare}
-          disabled={isCapturing}
-        >
-          <Text style={styles.captureButtonText}>
-            {isCapturing ? '📸 Saving...' : '📸 Capture & Share'}
-          </Text>
-        </TouchableOpacity>
-
-        {/* Plane toggle (only in AR mode) */}
-        {useARMode && arSupported && (
-          <TouchableOpacity
-            style={styles.planeToggleButton}
-            onPress={() => setShowPlanes(!showPlanes)}
-          >
-            <Text style={styles.planeToggleText}>
-              {showPlanes ? '🟢 Hide Surfaces' : '⚪ Show Surfaces'}
-            </Text>
-          </TouchableOpacity>
-        )}
-      </View>
 
       {/* Instructions */}
       <View style={styles.instructionsContainer} pointerEvents="none">
         <Text style={styles.instructionsText}>
-          {modelInfo.emoji} {useARMode ? 'AR' : '3D'} {hasMultipleFlowers ? 'Bouquet' : flowerName} Preview
+          {modelInfo.emoji} 3D {hasMultipleFlowers ? 'Bouquet' : flowerName} Preview
         </Text>
         <Text style={styles.instructionsSubtext}>
           {hasMultipleFlowers && `${flowers.length} flowers • `}
-          {useARMode && arSupported
-            ? 'Tap "Enter AR" to place in real world'
-            : 'View your bouquet in 3D'}
+          View your bouquet in 3D
         </Text>
       </View>
 
@@ -570,13 +389,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingBottom: 20,
     zIndex: 5,
+    alignItems: 'center',
   },
   infoBadge: {
-    alignSelf: 'center',
     paddingHorizontal: 20,
     paddingVertical: 10,
     borderRadius: 20,
     backgroundColor: 'rgba(255, 209, 102, 0.9)',
+    marginBottom: 12,
   },
   infoText: {
     color: '#000000',
@@ -667,52 +487,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 18,
   },
-  arEntryContainer: {
-    position: 'absolute',
-    bottom: 100,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-    paddingHorizontal: 24,
-    zIndex: 150,
-  },
-  arEntryButton: {
-    width: '100%',
-    borderRadius: 12,
-    overflow: 'hidden',
-    shadowColor: '#FFD166',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 8,
-    elevation: 6,
-  },
-  arEntryHint: {
-    color: 'rgba(255, 255, 255, 0.9)',
-    fontSize: 14,
-    textAlign: 'center',
-    marginTop: 12,
-    fontWeight: '600',
-    textShadowColor: 'rgba(0, 0, 0, 0.75)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 3,
-  },
-  warningBadge: {
-    position: 'absolute',
-    top: 120,
-    left: 20,
-    right: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255, 165, 0, 0.9)',
-    zIndex: 5,
-  },
-  warningText: {
-    color: '#000000',
-    fontSize: 12,
-    fontWeight: '600',
-    textAlign: 'center',
-  },
   captureButton: {
     marginTop: 12,
     alignSelf: 'center',
@@ -731,20 +505,5 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     letterSpacing: 0.5,
-  },
-  planeToggleButton: {
-    marginTop: 8,
-    alignSelf: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.3)',
-  },
-  planeToggleText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '600',
   },
 });

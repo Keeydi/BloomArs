@@ -111,24 +111,37 @@ export async function detectFlowerML(imageUri: string): Promise<{
 
     console.log('🌸 Running ML inference on image:', imageUri);
 
-    // Load image using expo-asset or fetch
-    const response = await fetch(imageUri);
-    const imageBlob = await response.blob();
+    const { manipulateAsync, SaveFormat } = await import('expo-image-manipulator');
+    const { decodeJpeg } = await import('@tensorflow/tfjs-react-native');
+    // Use legacy import - same as camera.tsx - to get EncodingType enum
+    const FileSystem = await import('expo-file-system/legacy');
 
-    // Create image element for TensorFlow
-    const imageElement = new Image();
-    const imageLoadPromise = new Promise<void>((resolve, reject) => {
-      imageElement.onload = () => resolve();
-      imageElement.onerror = reject;
+    // Resize image to 224x224 for MobileNet
+    const manipResult = await manipulateAsync(
+      imageUri,
+      [{ resize: { width: 224, height: 224 } }],
+      { format: SaveFormat.JPEG, base64: false }
+    );
+
+    // Read the image file as binary data using the legacy module (has EncodingType)
+    const imgB64 = await FileSystem.readAsStringAsync(manipResult.uri, {
+      encoding: FileSystem.EncodingType.Base64,
     });
+    const imgBuffer = tf.util.encodeString(imgB64, 'base64');
+    const raw = new Uint8Array(imgBuffer);
 
-    imageElement.src = URL.createObjectURL(imageBlob);
-    await imageLoadPromise;
+    // Decode JPEG to tensor using React Native method
+    const imageTensor = decodeJpeg(raw);
 
-    // Run MobileNet classification
-    const predictions = await model.classify(imageElement);
+    console.log('🖼️ Image tensor shape:', imageTensor.shape);
+
+    // Run MobileNet classification directly on the tensor
+    const predictions = await model.classify(imageTensor as any);
 
     console.log('🤖 ML Predictions:', predictions);
+
+    // Clean up tensor
+    imageTensor.dispose();
 
     // Find best flower-related prediction
     let bestFlowerPrediction = predictions[0];
@@ -152,9 +165,6 @@ export async function detectFlowerML(imageUri: string): Promise<{
     console.log('🎨 Extracting color from image...');
     const dominantColor = await extractDominantColor(imageUri);
 
-    // Clean up
-    URL.revokeObjectURL(imageElement.src);
-
     const result = {
       flowerType,
       flowerName,
@@ -170,19 +180,8 @@ export async function detectFlowerML(imageUri: string): Promise<{
     return result;
   } catch (error) {
     console.error('❌ ML detection error:', error);
-
-    // Fallback: just extract color and use generic flower
-    const dominantColor = await extractDominantColor(imageUri);
-
-    return {
-      flowerType: 'generic-flower',
-      flowerName: 'Flower',
-      confidence: 0.5,
-      color: dominantColor,
-      shape: 'round',
-      imageUri,
-      detectedAt: Date.now(),
-    };
+    // Re-throw so camera.tsx can use its proper color-based fallback
+    throw error;
   }
 }
 

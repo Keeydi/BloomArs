@@ -51,19 +51,7 @@
       "expo-asset"
     ],
     "extra": {
-      "router": {},
-      "eas": {
-        "projectId": "c0908a62-3968-4b8e-a559-b7330661bb66"
-      }
-    },
-    "updates": {
-      "enabled": false,
-      "fallbackToCacheTimeout": 0,
-      "checkAutomatically": "ON_ERROR_RECOVERY",
-      "url": null
-    },
-    "runtimeVersion": {
-      "policy": "nativeVersion"
+      "router": {}
     }
   }
 }

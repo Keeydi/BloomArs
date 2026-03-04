@@ -12,6 +12,54 @@ import { Renderer } from 'expo-three';
 import * as THREE from 'three';
 import { LinearGradient } from 'expo-linear-gradient';
 import { detectFlowerML, preloadMLModel, isMLModelReady } from '@/utils/mlFlowerDetector';
+import { detectFlowerByImage } from '@/utils/imageFlowerDetector';
+
+// Simple color-based flower detection
+function detectFlowerByColor(hexColor: string) {
+  const rgb = hexToRgb(hexColor);
+  if (!rgb) return { flowerType: 'rose', flowerName: 'Rose', color: hexColor, shape: 'round', confidence: 0.8 };
+
+  const { r, g, b } = rgb;
+
+  console.log(`🎨 RGB values: R=${r}, G=${g}, B=${b}`);
+
+  // Purple/Lavender tulips (CHECK FIRST - your tulip is #86708C = RGB(134, 112, 140))
+  if (b > 120 && b > r && b > g) {
+    return { flowerType: 'tulip', flowerName: 'Tulip', color: hexColor, shape: 'round', confidence: 0.85 };
+  }
+
+  // Pink tulips
+  if (r > 150 && b > 120 && Math.abs(r - b) < 60 && g > 80 && g < 150) {
+    return { flowerType: 'tulip', flowerName: 'Tulip', color: hexColor, shape: 'round', confidence: 0.8 };
+  }
+
+  // Yellow/Orange flowers (sunflowers)
+  if (r > 200 && g > 150 && b < 120) {
+    return { flowerType: 'sunflower', flowerName: 'Sunflower', color: hexColor, shape: 'round', confidence: 0.85 };
+  }
+
+  // Red flowers (roses)
+  if (r > 150 && r > g + 50 && r > b + 50) {
+    return { flowerType: 'rose', flowerName: 'Rose', color: hexColor, shape: 'round', confidence: 0.85 };
+  }
+
+  // Pink flowers (cherry blossoms)
+  if (r > 180 && g > 100 && b > 100 && r > b && r > g) {
+    return { flowerType: 'cherry-blossom', flowerName: 'Cherry Blossom', color: hexColor, shape: 'round', confidence: 0.8 };
+  }
+
+  // Default to tulip (since most flower photos will be colorful)
+  return { flowerType: 'tulip', flowerName: 'Tulip', color: hexColor, shape: 'round', confidence: 0.7 };
+}
+
+function hexToRgb(hex: string) {
+  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  return result ? {
+    r: parseInt(result[1], 16),
+    g: parseInt(result[2], 16),
+    b: parseInt(result[3], 16)
+  } : null;
+}
 
 export default function CameraScreen() {
   const router = useRouter();
@@ -26,23 +74,20 @@ export default function CameraScreen() {
   const [capturedImageUri, setCapturedImageUri] = useState<string | null>(null);
   const [extractedColor, setExtractedColor] = useState<string>('#FF5C8A');
   const [mlDetectionResult, setMlDetectionResult] = useState<any>(null);
-  const [useMLDetection, setUseMLDetection] = useState(true);
+  const [tfReady, setTfReady] = useState(false);
   const { setDetectedFlower, detectedFlower } = useBouquetStore();
 
-  // Preload ML model on mount
+  // Pre-initialize TF.js on mount so it's ready when the user takes a photo
   useEffect(() => {
-    const initML = async () => {
-      try {
-        console.log('🤖 Preloading ML model...');
-        await preloadMLModel();
-        console.log('✅ ML model ready for detection');
-      } catch (error) {
-        console.warn('⚠️ ML model preload failed, will use manual selection:', error);
-        setUseMLDetection(false);
-      }
-    };
-
-    initML();
+    import('@tensorflow/tfjs').then(tf => {
+      tf.ready().then(() => {
+        setTfReady(true);
+        console.log('✅ TF.js ready');
+      }).catch(err => {
+        console.warn('⚠️ TF.js init failed:', err);
+        setTfReady(true); // still allow detection attempt
+      });
+    });
   }, []);
 
   // Available flower types for selection
@@ -138,34 +183,36 @@ export default function CameraScreen() {
         to: savedPath,
       });
 
-      // Try ML detection first if enabled and model is ready
-      if (useMLDetection && isMLModelReady()) {
-        console.log('🤖 Running ML flower detection...');
-        try {
-          const mlResult = await detectFlowerML(savedPath);
-          setMlDetectionResult(mlResult);
-          setExtractedColor(mlResult.color);
+      // Try ML-based detection first
+      let flowerResult;
 
-          // If confidence is high enough, use ML result directly
-          if (mlResult.confidence > 0.6) {
-            console.log(`✅ High confidence ML detection (${(mlResult.confidence * 100).toFixed(1)}%): ${mlResult.flowerName}`);
-
-            // Store detected flower and navigate to AR preview
-            setDetectedFlower(mlResult);
-            router.push('/ar-preview');
-            return;
-          } else {
-            console.log(`⚠️ Low confidence ML detection (${(mlResult.confidence * 100).toFixed(1)}%), showing manual selection`);
-          }
-        } catch (mlError) {
-          console.error('❌ ML detection failed:', mlError);
-        }
+      // Always use image-based detection (correctly reads actual pixel colors via TF.js)
+      // ML (MobileNet) is skipped — it can't distinguish roses from tulips (not in ImageNet classes)
+      console.log('🌸 Running pixel-based flower detection...');
+      try {
+        const imageResult = await detectFlowerByImage(savedPath);
+        flowerResult = {
+          flowerType: imageResult.type,
+          flowerName: imageResult.displayName,
+          confidence: imageResult.confidence,
+          color: imageResult.color,
+          shape: 'round',
+        };
+        console.log(`✅ Detected: ${flowerResult.flowerName} (confidence: ${flowerResult.confidence.toFixed(2)}, color: ${flowerResult.color})`);
+      } catch (detectionError) {
+        console.warn('⚠️ Detection failed, using default:', detectionError);
+        flowerResult = { flowerType: 'rose', flowerName: 'Rose', color: '#DC143C', shape: 'round', confidence: 0.5 };
       }
 
-      // Fallback: Extract color and show manual selection modal
-      console.log('🎨 Extracting color from captured image...');
-      const color = await extractDominantColor(savedPath);
-      console.log('✅ Color extracted:', color);
+      // Automatically navigate to AR preview
+      setDetectedFlower({
+        ...flowerResult,
+        imageUri: savedPath,
+        detectedAt: Date.now(),
+      });
+
+      router.push('/ar-preview');
+      return;
 
       // Store the image URI and color, then show selection modal
       setCapturedImageUri(savedPath);

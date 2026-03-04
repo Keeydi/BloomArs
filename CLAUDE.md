@@ -45,14 +45,19 @@ npm run ios:build         # Build and run iOS app
 
 ### State Management
 - **Zustand** for global state ([bouquetStore.ts](store/bouquetStore.ts))
-- **AsyncStorage** for persistence (persists `savedBouquets` only)
+- **AsyncStorage** for persistence (persists `savedBouquets` only, NOT `currentBouquet`)
+- **Auto-positioning algorithm** in `addFlower()`:
+  - First flower at center (0, -0.5, 0)
+  - Subsequent flowers arranged in radial pattern using cosine/sine calculations
+  - Automatic height variation (+0.05 per flower) and rotation (45° increments)
 - Main store actions:
   - `createBouquet()` - Initialize new bouquet
-  - `setDetectedFlower()` - Store scanned flower data
-  - `addFlower()`, `updateFlower()`, `removeFlower()` - Flower management
-  - `saveBouquet()`, `loadBouquet()` - Persistence operations
+  - `setDetectedFlower()` - Store scanned flower data (5-second expiration)
+  - `addFlower()`, `updateFlower()`, `removeFlower()`, `duplicateFlower()` - Flower management
+  - `saveBouquet()`, `loadBouquet()`, `deleteBouquet()` - Persistence operations
   - `setRibbon()`, `setWrapper()` - Accessory management
   - `updateARSettings()` - AR positioning/scaling
+  - `resetCurrentBouquet()` - Clears all temporary state
 
 ### Type System
 All types defined in [types/index.ts](types/index.ts):
@@ -89,13 +94,11 @@ import { Flower } from '@/types';
 - Detected flower stored temporarily (5-second expiration in `getDetectedFlower()`)
 
 ### AR & 3D Models
-- **expo-gl** for WebGL rendering
-- **three.js** v0.145.0 for 3D graphics
-- Metro config customized to handle:
-  - 3D file extensions (.glb, .gltf, .bin)
-  - three.js ES module imports
-  - Special resolver for `three/examples/` imports
-- Babel plugin transforms `import.meta` for React Native compatibility
+- **expo-gl** v16.0.10 for WebGL rendering
+- **three.js** v0.166.0 for 3D graphics
+- **expo-three** v8.0.0 for React Native integration
+- Metro config customized to handle 3D file extensions (.glb, .gltf, .bin)
+- Transformer configured with `experimentalImportSupport` and `inlineRequires` for ES modules
 - On-device AR using ARKit (iOS) / ARCore (Android) - see [FREE_SETUP.md](FREE_SETUP.md)
 
 ### Styling & Theming
@@ -107,29 +110,26 @@ import { Flower } from '@/types';
 ## Important Configuration Files
 
 ### [babel.config.js](babel.config.js)
-- Custom plugin to transform `import.meta` → `{}` for RN compatibility
+- Uses `babel-preset-expo` preset
 - `react-native-reanimated/plugin` must be last
 
 ### [metro.config.js](metro.config.js)
-- Custom resolver for three.js examples imports
-- Asset extensions include `.glb`, `.gltf`, `.bin`
-- Experimental import support enabled
+- Asset extensions include `.glb`, `.gltf`, `.bin` for 3D models
+- Transformer configured with `experimentalImportSupport` and `inlineRequires` enabled
 
 ### [app.json](app.json)
 - Camera permissions configured for iOS/Android
-- ARKit support enabled (iOS)
-- Min SDK 28 (Android)
-- Hermes JS engine
+- Location permissions for AR environment mapping
+- Hermes JS engine enabled
 - Bundle identifier: `com.bloomar.app`
+- EAS project ID: `c0908a62-3968-4b8e-a559-b7330661bb66`
+- Updates disabled (no OTA updates configured)
 
 ## Development Notes
 
-### Package Compatibility
-Current warnings (non-blocking):
-- `expo-gl@15.0.5` - expected `~16.0.9`
-- `react-native-worklets@0.7.1` - expected `0.5.1`
-
-These can be updated if issues arise, but app currently works with these versions.
+### Package Overrides
+- React 19.1.0 explicitly set via `overrides` in package.json
+- `react-native-worklets` locked to 0.5.1 (required for AR features)
 
 ### File Storage Locations
 - Scanned flowers: `FileSystem.documentDirectory/flowers/`
