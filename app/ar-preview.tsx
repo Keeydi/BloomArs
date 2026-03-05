@@ -1,12 +1,17 @@
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert, PanResponder, Dimensions } from 'react-native';
-import { useRouter, useLocalSearchParams } from 'expo-router';
-import { useState, useRef, useEffect } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert, PanResponder } from 'react-native';
+import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { GLView } from 'expo-gl';
 import { Renderer } from 'expo-three';
 import { CameraView } from 'expo-camera';
 import { useBouquetStore } from '@/store/bouquetStore';
 import { LinearGradient } from 'expo-linear-gradient';
 import { getFlowerModel } from '@/utils/modelRegistry';
+
+// Global counter for unique GL context IDs - persists across component remounts
+let glContextCounter = 0;
+// Track if a GL context is currently active (prevents multiple contexts)
+let glContextActive = false;
 import * as THREE from 'three';
 import { captureRef } from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
@@ -22,10 +27,12 @@ export default function ARPreviewScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadingStatus, setLoadingStatus] = useState('Starting camera...');
   const [isCapturing, setIsCapturing] = useState(false);
+  const [glViewReady, setGlViewReady] = useState(false);
   const glContextCreated = useRef(false);
+  const mountedRef = useRef(true);
 
-  // Unique key to force GLView remount when flowers change
-  const glViewKey = useRef(`gl-${Date.now()}`).current;
+  // Unique key for GLView - updated when screen focuses
+  const [glViewKey, setGlViewKey] = useState(() => `gl-${Date.now()}`);
 
   // Refs
   const viewRef = useRef<View>(null);
@@ -35,11 +42,99 @@ export default function ARPreviewScreen() {
   const modelRef = useRef<THREE.Group | null>(null);
   const rotationRef = useRef({ x: 0, y: 0 });
   const scaleRef = useRef(0.8);
+  const animationFrameRef = useRef<number | null>(null);
+  const glRef = useRef<any>(null);
 
-  // Timeout to handle if GL context never creates (runs only once on mount)
+  // Cleanup function for GL resources
+  const cleanupGLResources = useCallback(() => {
+    console.log('🧹 AR Preview cleanup - disposing GL resources');
+
+    // Cancel animation frame first
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+      console.log('🛑 Animation frame cancelled');
+    }
+
+    // Clean up THREE.js resources to prevent memory leaks and GL context issues
+    if (modelRef.current) {
+      modelRef.current.traverse((child: any) => {
+        if (child.geometry) {
+          child.geometry.dispose();
+        }
+        if (child.material) {
+          if (Array.isArray(child.material)) {
+            child.material.forEach((mat: any) => mat.dispose());
+          } else {
+            child.material.dispose();
+          }
+        }
+      });
+      modelRef.current = null;
+    }
+
+    if (sceneRef.current) {
+      while (sceneRef.current.children.length > 0) {
+        sceneRef.current.remove(sceneRef.current.children[0]);
+      }
+      sceneRef.current = null;
+    }
+
+    if (rendererRef.current) {
+      rendererRef.current.dispose();
+      rendererRef.current = null;
+      console.log('🧹 Renderer disposed');
+    }
+
+    if (cameraRef.current) {
+      cameraRef.current = null;
+    }
+
+    glRef.current = null;
+    glContextActive = false;
+    console.log('🧹 GL context marked as inactive');
+  }, []);
+
+  // Use focus effect to mount/unmount GLView based on screen focus
+  // This ensures clean GL context lifecycle when navigating
+  useFocusEffect(
+    useCallback(() => {
+      console.log('👁️ Screen focused, preparing GLView...');
+      mountedRef.current = true;
+      glContextCreated.current = false;
+      setIsLoading(true);
+      setLoadingStatus('Starting camera...');
+
+      // Generate new key for fresh GLView instance
+      glContextCounter++;
+      const newKey = `gl-${glContextCounter}-${Date.now()}`;
+
+      // Small delay before mounting GLView to ensure previous context is cleaned
+      const mountTimer = setTimeout(() => {
+        if (mountedRef.current) {
+          console.log('🎬 GLView ready to mount, key:', newKey);
+          setGlViewKey(newKey);
+          setGlViewReady(true);
+        }
+      }, 500); // 500ms delay for stable mount
+
+      return () => {
+        console.log('👁️ Screen unfocused, cleaning up...');
+        mountedRef.current = false;
+        clearTimeout(mountTimer);
+        setGlViewReady(false); // Unmount GLView immediately
+        cleanupGLResources();
+      };
+    }, [cleanupGLResources])
+  );
+
+  // Timeout to handle if GL context never creates
   useEffect(() => {
+    if (!glViewReady) return; // Only run when GLView is mounted
+
     let isMounted = true;
     let timeoutId: ReturnType<typeof setTimeout>;
+    let failsafeId: ReturnType<typeof setTimeout>;
 
     timeoutId = setTimeout(() => {
       if (isMounted && !glContextCreated.current) {
@@ -47,14 +142,21 @@ export default function ARPreviewScreen() {
       }
     }, 1000);
 
-    // Note: Removed the 20-second failsafe timeout - GLView can take longer on some devices
-    // The loading overlay will be hidden when onContextCreate completes successfully
+    // Failsafe: if GL context doesn't create after 10 seconds, hide loading
+    failsafeId = setTimeout(() => {
+      if (isMounted && !glContextCreated.current) {
+        console.warn('⚠️ GL context timeout - hiding loading overlay');
+        setLoadingStatus('3D engine unavailable');
+        setIsLoading(false);
+      }
+    }, 10000);
 
     return () => {
       isMounted = false;
       clearTimeout(timeoutId);
+      clearTimeout(failsafeId);
     };
-  }, []); // Empty dependency - only run once on mount
+  }, [glViewReady, glViewKey]); // Re-run when GLView mounts or key changes
 
   // Pan responder for rotation and scaling
   const panResponder = useRef(
@@ -94,7 +196,8 @@ export default function ARPreviewScreen() {
     try {
       // Mark that GL context was created IMMEDIATELY
       glContextCreated.current = true;
-      console.log('✅ GL context created');
+      glContextActive = true;
+      console.log('✅ GL context created, marked as active');
       setLoadingStatus('Setting up 3D...');
 
       // Polyfill getShaderPrecisionFormat — can return null on some Android devices
@@ -166,26 +269,40 @@ export default function ARPreviewScreen() {
         if (total === 1) {
           return { x: 0, y: 0, z: 0 }; // Single flower at center
         }
-        // Arrange in a circular/bouquet pattern
+        // Arrange in a tight circular/bouquet pattern - flowers close together
         const angle = (index / total) * Math.PI * 2;
-        const radius = 0.4 + (index % 2) * 0.15; // Varying radius for natural look
-        const heightOffset = (index % 3) * 0.2 - 0.2; // Varying heights
+        const radius = 0.15 + (index % 2) * 0.08; // Tighter radius for bouquet look
+        const heightOffset = (index % 3) * 0.1 - 0.05; // Subtle height variation
         return {
           x: Math.cos(angle) * radius,
           y: heightOffset,
-          z: Math.sin(angle) * radius - 0.3, // Slightly forward
+          z: Math.sin(angle) * radius, // Centered
         };
       };
 
-      const flowersToRender = bouquetFlowers.length > 0
-        ? bouquetFlowers.map((f, index) => ({
+      // Expand flowers based on quantity - each flower entry can have quantity > 1
+      const expandedFlowers: typeof bouquetFlowers = [];
+      for (const flower of bouquetFlowers) {
+        const qty = flower.quantity || 1;
+        for (let i = 0; i < qty; i++) {
+          expandedFlowers.push({
+            ...flower,
+            id: `${flower.id}-${i}`, // Unique ID for each instance
+          });
+        }
+      }
+
+      // Calculate total for positioning
+      const totalFlowers = expandedFlowers.length;
+      console.log(`🌺 Expanding ${bouquetFlowers.length} flower entries to ${totalFlowers} total (based on quantity)`);
+
+      const flowersToRender = totalFlowers > 0
+        ? expandedFlowers.map((f, index) => ({
             flowerType: f.flowerType || 'rose',
             color: f.color,
             size: f.size || 0.8,
-            // Use stored position if valid, otherwise calculate bouquet position
-            position: (f.position && (f.position.x !== 0 || f.position.y !== 0 || f.position.z !== 0))
-              ? f.position
-              : getBouquetPosition(index, bouquetFlowers.length),
+            // Calculate bouquet position for each flower instance
+            position: getBouquetPosition(index, totalFlowers),
             rotation: f.rotation ?? (index * 45),
           }))
         : detectedFlower
@@ -305,20 +422,30 @@ export default function ARPreviewScreen() {
 
           // Normalize: scale model so its largest dimension equals TARGET_SIZE
           // This ensures all models (tulip, sunflower, rose, etc.) appear at consistent size
-          const TARGET_SIZE = 1.2; // Desired visible size in scene units
+          // Sunflower gets a slightly larger size for better visibility
+          const TARGET_SIZE = flower.flowerType === 'sunflower' ? 1.8 : 1.5;
           const normalizeScale = maxDim > 0 ? TARGET_SIZE / maxDim : 1;
           const finalScale = normalizeScale * flower.size;
 
           console.log(`🔧 Scaling "${flower.flowerType}": maxDim=${maxDim.toFixed(3)}, normalizeScale=${normalizeScale.toFixed(3)}, finalScale=${finalScale.toFixed(3)}`);
 
-          // Apply the flower's own color
+          // Apply the flower's own color with enhanced brightness
+          // For sunflower, use a brighter yellow if the detected color is too dark
+          let flowerColor = flower.color;
+          if (flower.flowerType === 'sunflower') {
+            // Use a vibrant sunflower yellow
+            flowerColor = '#FFD700'; // Golden yellow
+          }
+
           instance.traverse((child: any) => {
             if (child instanceof THREE.Mesh) {
               child.material = new THREE.MeshStandardMaterial({
-                color: flower.color,
+                color: flowerColor,
                 side: THREE.DoubleSide,
-                metalness: 0.1,
-                roughness: 0.8,
+                metalness: 0.0,
+                roughness: 0.6,
+                emissive: flowerColor,
+                emissiveIntensity: 0.15, // Slight glow for visibility
               });
             }
           });
@@ -362,9 +489,16 @@ export default function ARPreviewScreen() {
 
       console.log(`🌸 Rendered ${flowersToRender.length} flower(s) in bouquet`);
 
-      // Start animation loop
+      // Store gl reference for cleanup
+      glRef.current = gl;
+
+      // Start animation loop with cancellation support
       const animate = () => {
-        requestAnimationFrame(animate);
+        if (!mountedRef.current) {
+          console.log('🛑 Animation stopped - component unmounted');
+          return;
+        }
+        animationFrameRef.current = requestAnimationFrame(animate);
         if (modelRef.current) {
           modelRef.current.rotation.x = rotationRef.current.x;
           modelRef.current.rotation.y = rotationRef.current.y;
@@ -386,6 +520,7 @@ export default function ARPreviewScreen() {
       // Restore console.error before logging the error
       console.error = originalConsoleError;
       console.error('❌ Error setting up 3D scene:', error);
+      glContextActive = false; // Mark as inactive on error
       setLoadingStatus('Error loading...');
       // Still hide loading after a short delay so user can see the error
       setTimeout(() => setIsLoading(false), 1500);
@@ -489,16 +624,18 @@ export default function ARPreviewScreen() {
         onLayout={(e) => console.log('📐 GL overlay laid out:', e.nativeEvent.layout)}
         pointerEvents="box-none"
       >
-        <GLView
-          key={glViewKey}
-          style={[styles.glView, { backgroundColor: 'transparent' }]}
-          onContextCreate={(gl) => {
-            console.log('🎮 GLView onContextCreate triggered, gl:', !!gl);
-            onContextCreate(gl);
-          }}
-          onLayout={(e) => console.log('📐 GLView layout:', e.nativeEvent.layout)}
-          msaaSamples={0}
-        />
+        {glViewReady && (
+          <GLView
+            key={glViewKey}
+            style={[styles.glView, { backgroundColor: 'transparent' }]}
+            onContextCreate={(gl) => {
+              console.log('🎮 GLView onContextCreate triggered, gl:', !!gl);
+              onContextCreate(gl);
+            }}
+            onLayout={(e) => console.log('📐 GLView layout:', e.nativeEvent.layout)}
+            msaaSamples={0}
+          />
+        )}
       </View>
 
       {/* Loading overlay */}
@@ -557,37 +694,29 @@ export default function ARPreviewScreen() {
   );
 }
 
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-
 const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#000000',
   },
   cameraContainer: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    width: SCREEN_WIDTH,
-    height: SCREEN_HEIGHT,
+    ...StyleSheet.absoluteFillObject,
     zIndex: 0,
   },
   fullScreenCamera: {
-    width: SCREEN_WIDTH,
-    height: SCREEN_HEIGHT,
+    flex: 1,
+    width: '100%',
+    height: '100%',
   },
   glOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    width: SCREEN_WIDTH,
-    height: SCREEN_HEIGHT,
+    ...StyleSheet.absoluteFillObject,
     zIndex: 1,
     backgroundColor: 'transparent',
   },
   glView: {
-    width: SCREEN_WIDTH,
-    height: SCREEN_HEIGHT,
+    flex: 1,
+    width: '100%',
+    height: '100%',
     backgroundColor: 'transparent',
   },
   touchOverlay: {

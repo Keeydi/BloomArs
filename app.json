@@ -4,10 +4,12 @@
     "slug": "bloomar",
     "version": "1.0.0",
     "orientation": "portrait",
+    "icon": "./assets/appLogo.png",
     "userInterfaceStyle": "light",
     "scheme": "bloomar",
     "jsEngine": "hermes",
     "splash": {
+      "image": "./assets/appLogo.png",
       "resizeMode": "contain",
       "backgroundColor": "#FF5C8A"
     },
@@ -28,6 +30,7 @@
     },
     "android": {
       "adaptiveIcon": {
+        "foregroundImage": "./assets/appLogo.png",
         "backgroundColor": "#FF5C8A"
       },
       "package": "com.bloomar.app",
