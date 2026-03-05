@@ -36,7 +36,18 @@ function base64ToUint8Array(base64: string): Uint8Array {
 }
 
 /**
+ * Calculate saturation for a single pixel
+ */
+function getPixelSaturation(r: number, g: number, b: number): number {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  return max === 0 ? 0 : (max - min) / max;
+}
+
+/**
  * Extract dominant color from image using jpeg-js decoder.
+ * Focuses on the most colorful/saturated pixels (actual flower petals)
+ * instead of averaging everything including dark branches and background.
  */
 async function extractPixelColor(imageUri: string): Promise<{
   r: number; g: number; b: number; brightness: number; saturation: number;
@@ -47,7 +58,7 @@ async function extractPixelColor(imageUri: string): Promise<{
     // Resize to small image for fast processing
     const result = await manipulateAsync(
       imageUri,
-      [{ resize: { width: 20, height: 20 } }],
+      [{ resize: { width: 30, height: 30 } }], // Slightly larger for better sampling
       { base64: true, format: SaveFormat.JPEG }
     );
 
@@ -69,28 +80,66 @@ async function extractPixelColor(imageUri: string): Promise<{
       throw new Error('No pixel data from jpeg decode');
     }
 
-    // Calculate average color from all pixels
-    let totalR = 0, totalG = 0, totalB = 0;
-    const pixelCount = decoded.width * decoded.height;
+    // Collect all pixels with their saturation values
+    const pixels: { r: number; g: number; b: number; sat: number; bright: number }[] = [];
 
     // JPEG decoded data is RGBA format (4 bytes per pixel)
     for (let i = 0; i < decoded.data.length; i += 4) {
-      totalR += decoded.data[i];
-      totalG += decoded.data[i + 1];
-      totalB += decoded.data[i + 2];
-      // decoded.data[i + 3] is alpha
+      const pr = decoded.data[i];
+      const pg = decoded.data[i + 1];
+      const pb = decoded.data[i + 2];
+      const sat = getPixelSaturation(pr, pg, pb);
+      const bright = (pr + pg + pb) / 3;
+
+      pixels.push({ r: pr, g: pg, b: pb, sat, bright });
     }
 
-    const r = Math.round(totalR / pixelCount);
-    const g = Math.round(totalG / pixelCount);
-    const b = Math.round(totalB / pixelCount);
+    // Sort pixels by saturation (most colorful first)
+    pixels.sort((a, b) => b.sat - a.sat);
+
+    // Take the top 30% most saturated pixels (these are likely the flower petals)
+    const topCount = Math.max(10, Math.floor(pixels.length * 0.3));
+    const topPixels = pixels.slice(0, topCount);
+
+    // Calculate weighted average of top saturated pixels
+    // Give more weight to brighter, more saturated pixels
+    let totalR = 0, totalG = 0, totalB = 0, totalWeight = 0;
+
+    for (const p of topPixels) {
+      // Weight: saturation * brightness factor (avoid very dark pixels)
+      const brightFactor = Math.max(0.3, p.bright / 255);
+      const weight = p.sat * brightFactor;
+      totalR += p.r * weight;
+      totalG += p.g * weight;
+      totalB += p.b * weight;
+      totalWeight += weight;
+    }
+
+    // Fallback if no weighted pixels found
+    if (totalWeight === 0) {
+      totalWeight = topPixels.length;
+      for (const p of topPixels) {
+        totalR += p.r;
+        totalG += p.g;
+        totalB += p.b;
+      }
+    }
+
+    const r = Math.round(totalR / totalWeight);
+    const g = Math.round(totalG / totalWeight);
+    const b = Math.round(totalB / totalWeight);
 
     const max = Math.max(r, g, b);
     const min = Math.min(r, g, b);
     const brightness = (r + g + b) / 3;
     const saturation = max === 0 ? 0 : (max - min) / max;
 
-    console.log('🎨 Extracted color:', { r, g, b, brightness: brightness.toFixed(1), saturation: saturation.toFixed(2) });
+    console.log('🎨 Extracted color (from top saturated pixels):', {
+      r, g, b,
+      brightness: brightness.toFixed(1),
+      saturation: saturation.toFixed(2),
+      sampledPixels: topCount
+    });
 
     return { r, g, b, brightness, saturation };
   } catch (error) {
@@ -113,71 +162,97 @@ export async function detectFlowerByImage(scannedImageUri: string): Promise<Flow
   const isBlueDominant = b > r && b > g;
   const isGreenDominant = g > r && g > b;
 
+  // Calculate color characteristics
+  // Yellow: G is high (close to R), B is low
+  // Red: R dominates, G and B are both low
+  const isYellowish = g > b + 20 && g > 80 && b < 120; // G significantly higher than B
+  const isStrongYellow = g > 100 && b < 100 && (g - b) > 40; // Clear yellow signature
+  const isStrongRed = isRedDominant && redAdvantage > 40 && g < 100 && !isYellowish;
+
   console.log('🔬 Color analysis:', {
     r, g, b, hex: hexColor,
-    redAdvantage, isRedDominant, isBlueDominant,
+    redAdvantage, isRedDominant, isBlueDominant, isStrongRed, isYellowish, isStrongYellow,
     brightness: brightness.toFixed(1), saturation: saturation.toFixed(2),
   });
 
-  // === SUNFLOWER — yellow detection (check FIRST before other flowers) ===
-  // Yellow/golden: high R and G, low B
-  // Key: Sunflower has yellow petals + brown center, so average may be orange-brown-yellow
-  // We need to detect BOTH pure yellow AND brownish-yellow (when whole flower is scanned)
+  // === SUNFLOWER — CHECK FIRST for yellow/golden colors ===
+  // Yellow/golden: G is high (close to R), B is low
+  // Must check BEFORE rose to avoid yellow being detected as red
 
-  // Bright yellow sunflower (R ≈ G >> B) - petals only
-  if (r > 150 && g > 100 && b < 120 && g > b * 1.5) {
-    console.log('✅ DETECTED: Sunflower (bright yellow petals)');
+  // Pure bright yellow sunflower (R ≈ G >> B)
+  if (r > 140 && g > 100 && b < 120 && isStrongYellow) {
+    console.log('✅ DETECTED: Sunflower (bright yellow)');
+    return { type: 'sunflower', confidence: 0.95, displayName: 'Sunflower', color: hexColor };
+  }
+
+  // Golden yellow sunflower
+  if (r > 130 && g > 90 && b < 110 && g > b * 1.3 && isYellowish) {
+    console.log('✅ DETECTED: Sunflower (golden yellow)');
     return { type: 'sunflower', confidence: 0.9, displayName: 'Sunflower', color: hexColor };
   }
 
-  // Golden/orange-yellow sunflower (R > G >> B)
-  if (r > 140 && g > 80 && b < 100 && g > b * 1.3 && r > b * 1.5) {
-    console.log('✅ DETECTED: Sunflower (golden)');
+  // Orange-yellow sunflower (R higher than G, but G still significant)
+  if (r > 140 && g > 80 && b < 100 && g > b && (r - g) < 80) {
+    console.log('✅ DETECTED: Sunflower (orange-yellow)');
     return { type: 'sunflower', confidence: 0.85, displayName: 'Sunflower', color: hexColor };
   }
 
-  // Brown-yellow mix (whole sunflower with brown center affecting average)
-  // Brown = R > G > B, with moderate values. Yellow influence keeps G relatively high.
-  // This catches cases where the brown center pulls down the brightness but R > G > B pattern remains
-  if (r > g && g > b && r > 100 && g > 60 && b < 100 && (r - b) > 40) {
-    console.log('✅ DETECTED: Sunflower (brown-yellow whole flower)');
+  // Brown-yellow mix (whole sunflower with brown center)
+  if (r > g && g > b && g > 70 && b < 90 && (g - b) > 15) {
+    console.log('✅ DETECTED: Sunflower (brown-yellow)');
     return { type: 'sunflower', confidence: 0.8, displayName: 'Sunflower', color: hexColor };
   }
 
-  // Orange-ish yellow (common when yellow petals + brown center average out)
-  if (r > 120 && g > 70 && b < 90 && r > g && g > b) {
-    console.log('✅ DETECTED: Sunflower (orange-yellow)');
-    return { type: 'sunflower', confidence: 0.75, displayName: 'Sunflower', color: hexColor };
+  // === ROSE — for strong red colors (NOT yellow) ===
+  // Rose = DEEP RED. R is much higher than BOTH G and B.
+  // Only match if NOT yellowish (G should be low for red)
+
+  // Strong red rose (high saturation, R dominates, G is LOW)
+  if (isStrongRed && g < 100 && b < 100) {
+    console.log('✅ DETECTED: Rose (strong red)');
+    return { type: 'rose', confidence: 0.95, displayName: 'Rose', color: hexColor };
   }
 
-  // === CHERRY BLOSSOM — checked BEFORE rose and tulip ===
+  // Dark red rose
+  if (isRedDominant && redAdvantage > 40 && g < 100 && b < 100 && !isYellowish) {
+    console.log('✅ DETECTED: Rose (dark red)');
+    return { type: 'rose', confidence: 0.92, displayName: 'Rose', color: hexColor };
+  }
+
+  // Medium red rose (G must be low to distinguish from yellow/orange)
+  if (isRedDominant && redAdvantage > 30 && g < 110 && b < 110 && !isYellowish && saturation > 0.4) {
+    console.log('✅ DETECTED: Rose (medium red)');
+    return { type: 'rose', confidence: 0.88, displayName: 'Rose', color: hexColor };
+  }
+
+  // === CHERRY BLOSSOM — PINK colors ===
   // Cherry blossom = PINK (soft pink, light pink, pastel pink)
-  // Key: R is highest, but G and B are also present (making it pink, not red)
-  // Pink signature: R > G, R > B, but G and B are relatively close to each other
+  // Key: R is highest, but G and B are BOTH present and BALANCED (making it pink, not red)
+  // Pink signature: R > G, R > B, G and B are close to each other, NOT too dark
 
   console.log('🌸 Cherry blossom check:', {
     rMinusG: r - g,
     rMinusB: r - b,
     gMinusB: Math.abs(g - b),
-    isPink: r > g && r > b && Math.abs(g - b) < 50
+    isPink: r > g && r > b && Math.abs(g - b) < 40 && brightness > 120
   });
 
   // Bright pink cherry blossom (R dominant, G and B balanced and high)
-  if (isRedDominant && g >= 120 && b >= 120 && b <= g * 1.5 && brightness > 140) {
+  if (isRedDominant && g >= 120 && b >= 120 && Math.abs(g - b) < 40 && brightness > 140) {
     const confidence = brightness > 170 ? 0.9 : 0.82;
     console.log('✅ DETECTED: Cherry Blossom (bright pink)');
     return { type: 'cherry-blossom', confidence, displayName: 'Cherry Blossom', color: hexColor };
   }
 
   // Medium pink cherry blossom (R dominant, G and B are close to each other)
-  // This catches pink where G and B are lower but balanced
-  if (isRedDominant && g >= 80 && b >= 80 && Math.abs(g - b) < 50 && brightness > 100) {
+  // IMPORTANT: Must have low red advantage to be pink, not red
+  if (isRedDominant && g >= 100 && b >= 100 && Math.abs(g - b) < 35 && redAdvantage < 50 && brightness > 130) {
     console.log('✅ DETECTED: Cherry Blossom (medium pink)');
     return { type: 'cherry-blossom', confidence: 0.85, displayName: 'Cherry Blossom', color: hexColor };
   }
 
   // Light/soft pink cherry blossom (high brightness, low saturation, pinkish tint)
-  if (brightness > 150 && saturation < 0.4 && r > g && r > b && r > 150) {
+  if (brightness > 160 && saturation < 0.35 && r > g && r > b && r > 160) {
     console.log('✅ DETECTED: Cherry Blossom (soft pink)');
     return { type: 'cherry-blossom', confidence: 0.8, displayName: 'Cherry Blossom', color: hexColor };
   }
@@ -189,24 +264,16 @@ export async function detectFlowerByImage(scannedImageUri: string): Promise<Flow
   }
 
   // Pastel pink (common cherry blossom color - pinkish with balanced G and B)
-  if (r > 140 && g > 100 && b > 100 && r > g && r > b && Math.abs(g - b) < 40) {
+  if (r > 150 && g > 110 && b > 110 && r > g && r > b && Math.abs(g - b) < 30 && brightness > 140) {
     console.log('✅ DETECTED: Cherry Blossom (pastel pink)');
     return { type: 'cherry-blossom', confidence: 0.78, displayName: 'Cherry Blossom', color: hexColor };
   }
 
-  // === ROSE — DARK RED ONLY ===
-  // User preference: only match truly dark/deep red roses.
-  // g < 110 AND b < 110 ensures it is genuinely dark red, not pink.
-  // b > g*0.5 guards against orange colors (where B << G).
-  if (isRedDominant && redAdvantage > 35 && g < 110 && b < 110 && b > g * 0.5) {
-    console.log('✅ DETECTED: Rose (dark red)');
-    return { type: 'rose', confidence: 0.92, displayName: 'Rose', color: hexColor };
-  }
-
-  // Slightly brighter but still clearly red (not pink, not orange)
-  if (isRedDominant && redAdvantage > 25 && g < 130 && b < 130 && b > g * 0.5 && saturation > 0.45) {
-    console.log('✅ DETECTED: Rose (deep red)');
-    return { type: 'rose', confidence: 0.85, displayName: 'Rose', color: hexColor };
+  // === ADDITIONAL ROSE FALLBACK ===
+  // Catch any remaining red-dominant colors with decent saturation
+  if (isRedDominant && redAdvantage > 20 && saturation > 0.35) {
+    console.log('✅ DETECTED: Rose (red fallback)');
+    return { type: 'rose', confidence: 0.75, displayName: 'Rose', color: hexColor };
   }
 
   // === TULIP — PURPLE/BLUE/VIOLET/MAGENTA ONLY ===
